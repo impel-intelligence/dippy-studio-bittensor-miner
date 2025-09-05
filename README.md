@@ -1,6 +1,6 @@
 # Dippy Studio Bittensor Miner
 
-A specialized Bittensor subnet miner for AI model training, focusing on LoRA fine-tuning of diffusion models like FLUX.1-dev.
+A specialized Bittensor subnet miner (subnet 231 on testnet) for AI model training and inference, featuring LoRA fine-tuning of FLUX.1-dev with TensorRT acceleration for high-performance inference.
 
 ## Prerequisites
 
@@ -20,71 +20,143 @@ Before running this miner, you must:
    - Read and accept the license agreement
    - Without accepting the license, the model download will fail
 
-## Running the Miner
+## Quick Start
 
-There are three components to running a miner:
-### 1. Miner Reverse Proxy
-This is the public entrypoint
+### One-Command Setup
 
-1. Register on testnet via the base command: `btcli s register --netuid 231 --subtensor.network test`
+The easiest way to get started is using the Makefile:
 
-2. Transfer 0.01 testnet TAO to the address `5FU2csPXS5CZfMVd2Ahdis9DNaYmpTCX4rsN11UW7ghdx24A` to qualify for a mining permit. This will be managed internally.
- 
-3.  Set up the environment variables to load your miner hotkey, and the URLs for which you will host the inference and training servers
+```bash
+# 1. Clone the repository
+git clone https://github.com/dippy-ai/dippy-studio-bittensor-miner
+cd dippy-studio-bittensor-miner
 
+# 2. Create .env file with your credentials
+cp .env.example .env
+# Edit .env and add your HF_TOKEN
 
-4. Setup the reverse proxy via the following:  
-a. Navigate to the `reverse_proxy` directory
-b. Install dependencies via `uv pip install -r requirements.txt`
-c. Start the miner via `python reverse_proxy/server.py`
+# 3. Run complete setup (builds everything and starts miner)
+make full-setup
 
+# 4. Check logs
+make logs
+```
 
-### 2. Miner Inference Server
-(Note: You will want to keep this service exposed to only the reverse proxy, guarded from the public internet)
+That's it! The miner server will be available at `http://localhost:8091`.
 
-1. Install the requirements via `uv pip install requirements.txt`
-2. Start the server via `python inference_server.py`
+### Available Make Commands
 
-### 3. Miner Training Server
-(Note: You will want to keep this service exposed to only the reverse proxy, guarded from the public internet)
+```bash
+# Quick Start
+make full-setup    # Complete setup: build images, TRT engine, and start miner
+make help          # Show all available commands
 
-### Using Docker (Recommended)
+# Individual Steps
+make build         # Build/rebuild Docker images
+make trt-build     # Build TRT engine (skips if exists)
+make trt-rebuild   # Force rebuild TRT engine
+make up            # Start miner service
+make down          # Stop miner service
+make logs          # Follow miner logs
+make restart       # Restart miner service
 
-Docker handles all dependencies and environment setup for you. No virtual environment needed!
+# Maintenance
+make clean-cache   # Remove all cached TRT engines (requires confirmation)
+```
 
-1. Create a `.env` file with your HuggingFace token:
+## Architecture
+
+The system consists of three main components:
+
+### 1. Reverse Proxy (Public Entrypoint)
+The reverse proxy handles Bittensor authentication and routes requests to internal services.
+
+**Setup:**
+1. Register on testnet: `btcli s register --netuid 231 --subtensor.network test`
+2. Transfer 0.01 testnet TAO to `5FU2csPXS5CZfMVd2Ahdis9DNaYmpTCX4rsN11UW7ghdx24A` for mining permit
+3. Configure environment variables in `reverse_proxy/.env`
+4. Install and run:
    ```bash
-   echo "HF_TOKEN=your_huggingface_token_here" > .env
+   cd reverse_proxy
+   uv pip install -e .[dev]
+   python server.py
    ```
 
-2. Start the miner:
-   ```bash
-   docker compose up -d
-   ```
+### 2. Miner Server (Combined Training & Inference)
+A unified FastAPI server (`miner_server.py`) that handles both LoRA training and TensorRT inference.
 
-   This will:
-   - Build the Docker image with all dependencies
-   - Start the miner API on port 8091
-   - Mount necessary volumes for model storage
-   - Enable GPU access for training
+**Features:**
+- **Training**: Background LoRA fine-tuning with HuggingFace upload
+- **Inference**: TensorRT-accelerated image generation with LoRA support
+- **Static file serving**: Direct image URL access
 
-3. Check logs:
-   ```bash
-   docker compose logs -f
-   ```
+**Endpoints:**
+- `POST /train` - Submit LoRA training job
+- `POST /inference` - Generate image (with optional LoRA)
+- `GET /training/status/{job_id}` - Check training status
+- `GET /inference/status/{job_id}` - Check inference status
+- `GET /inference/result/{job_id}` - Download generated image
+- `GET /health` - Health check
+
+### 3. TensorRT Engine
+High-performance inference engine for FLUX.1-dev model.
+
+**Building the Engine:**
+```bash
+# Using make (recommended)
+make trt-build     # Build if not exists
+make trt-rebuild   # Force rebuild
+
+# Or Docker directly
+docker compose run --rm trt-builder
+```
+
+## Configuration
+
+### Environment Variables
+
+Create a `.env` file in the project root:
+
+```bash
+# Required
+HF_TOKEN=your_huggingface_token_here        # HuggingFace token with write permissions
+
+# Optional (with defaults)
+ENABLE_TRAINING=true                        # Enable training endpoints
+ENABLE_INFERENCE=true                       # Enable inference endpoints
+MODEL_PATH=black-forest-labs/FLUX.1-dev    # Base model path
+OUTPUT_DIR=/app/output                      # Output directory in container (mapped to ./output on host)
+MINER_SERVER_PORT=8091                      # Server port
+MINER_SERVER_HOST=0.0.0.0                   # Server host
+SERVICE_URL=http://localhost:8091           # Public URL for image serving
+```
+
+**Note:** Training outputs and generated images are persisted in the `./output` directory on the host, which is mapped to `/app/output` in the container.
+
+For the reverse proxy, create `reverse_proxy/.env`:
+
+```bash
+# Required
+MINER_HOTKEY=your_miner_hotkey_here         # Bittensor miner hotkey
+
+# Service endpoints (internal)
+TRAINING_SERVER_URL=http://localhost:8091   # Miner server for training
+INFERENCE_SERVER_URL=http://localhost:8091  # Miner server for inference
+```
 
 
 ## How It Works
 
-The miner operates as a training service that:
+The miner provides two main services:
 
-1. **Receives training requests** via POST to `/train` endpoint with:
+### Training Service
+1. **Receives training requests** via POST to `/train`:
    - `job_type`: "lora_training"
    - `params`: Including prompt, image_b64, seed
    - `job_id`: Unique identifier
    - `validator_endpoint`: Callback URL for results
 
-2. **Processes training jobs**:
+2. **Processes training jobs** in background:
    - Generates configuration from request parameters
    - Performs LoRA fine-tuning on FLUX.1-dev
    - Uses provided prompts and images for training
@@ -94,14 +166,76 @@ The miner operates as a training service that:
    - Uploads LoRA weights and metadata
    - Makes models publicly accessible
 
-4. **Reports completion** back to the validator endpoint
+4. **Reports completion** back to validator endpoint
 
-## Manual Training
+### Inference Service
+1. **Receives generation requests** via POST to `/inference`:
+   - `prompt`: Text description for image generation
+   - `lora_path`: Optional path to LoRA weights
+   - `width/height`: Image dimensions
+   - `num_inference_steps`: Quality control
+   - `guidance_scale`: Prompt adherence strength
+   - `seed`: For reproducibility
 
-For testing or custom training jobs:
+2. **Generates images** using TensorRT:
+   - Uses pre-built TRT engine for fast inference
+   - Supports dynamic LoRA switching via refitting
+   - Returns image URL immediately after generation
 
+3. **Serves generated images** via static file server:
+   - Images accessible at `/images/{job_id}.png`
+   - Direct URL access for validator retrieval
+
+## API Examples
+
+### Submit Training Job
 ```bash
-python run.py config/your_config.yaml --seed 42
+curl -X POST http://localhost:8091/train \
+  -H "Content-Type: application/json" \
+  -d '{
+    "job_type": "lora_training",
+    "job_id": "test-training-001",
+    "params": {
+      "prompt": "A cute anime girl",
+      "image_b64": "...",
+      "seed": 42
+    }
+  }'
+```
+
+### Generate Image with Base Model
+```bash
+curl -X POST http://localhost:8091/inference \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "A beautiful sunset over mountains",
+    "width": 1024,
+    "height": 1024,
+    "num_inference_steps": 28,
+    "guidance_scale": 7.5,
+    "seed": 42
+  }'
+```
+
+### Generate Image with LoRA
+```bash
+curl -X POST http://localhost:8091/inference \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "A portrait in anime style",
+    "lora_path": "/app/models/anime_lora.safetensors",
+    "width": 1024,
+    "height": 1024
+  }'
+```
+
+### Check Job Status
+```bash
+# Training status
+curl http://localhost:8091/training/status/{job_id}
+
+# Inference status
+curl http://localhost:8091/inference/status/{job_id}
 ```
 
 ## System Requirements
@@ -120,6 +254,18 @@ python run.py config/your_config.yaml --seed 42
 
 ## Troubleshooting
 
+### TensorRT Engine Issues
+If inference fails with TRT errors:
+1. Rebuild the engine: `docker compose --profile build up trt-builder --force-recreate`
+2. Check GPU compatibility (requires compute capability 7.0+)
+3. Ensure sufficient GPU memory (24GB+ recommended)
+
+### LoRA Loading Issues
+If LoRA weights don't apply correctly:
+1. Verify LoRA was trained for FLUX.1-dev (not SDXL or other models)
+2. Check file path is accessible within container
+3. Ensure LoRA file is in .safetensors format
+
 ### Model Download Issues
 If you encounter permission errors downloading FLUX.1-dev:
 1. Ensure you've accepted the model license on HuggingFace
@@ -130,13 +276,21 @@ If you encounter permission errors downloading FLUX.1-dev:
 If training fails with CUDA out of memory:
 1. Reduce batch size in configuration
 2. Enable gradient checkpointing
-3. Use a GPU with more VRAM
+3. Ensure TRT server is unloaded during training
+4. Use a GPU with more VRAM
+
+### Docker Issues
+If container fails to start:
+1. Check nvidia-docker is installed: `docker run --rm --gpus all nvidia/cuda:11.8.0-base-ubuntu22.04 nvidia-smi`
+2. Verify Docker has GPU access
+3. Check port 8091 is not in use: `lsof -i :8091`
 
 ### Connection Issues
 If the miner can't connect to validators:
 1. Check firewall settings for port 8091
 2. Ensure Docker networking is properly configured
 3. Verify validator endpoints are accessible
+4. Check SERVICE_URL environment variable for production
 
 ## Additional Resources
 

@@ -3,23 +3,21 @@ import time
 
 
 class ToolkitProgressBar(tqdm):
+    """Simple wrapper around tqdm that adds pause/unpause methods"""
+    
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.paused = False
-        self.last_time = self._time()
 
     def pause(self):
-        if not self.paused:
-            self.paused = True
-            self.last_time = self._time()
+        """Pause the progress bar (no-op for now)"""
+        self.paused = True
 
     def unpause(self):
-        if self.paused:
-            self.paused = False
-            cur_t = self._time()
-            self.start_t += cur_t - self.last_time
-            self.last_print_t = cur_t
+        """Unpause the progress bar (no-op for now)"""
+        self.paused = False
 
     def update(self, *args, **kwargs):
+        """Update progress bar only if not paused"""
         if not self.paused:
             super().update(*args, **kwargs)

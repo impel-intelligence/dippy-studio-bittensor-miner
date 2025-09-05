@@ -1,35 +1,65 @@
-FROM nvidia/cuda:12.6.3-runtime-ubuntu22.04
+# CUDA 12.4 runtime to match host Torch (cu124)
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
 
-# Install Python and system dependencies
-RUN apt-get update && apt-get install -y \
-    python3.10 \
-    python3-pip \
-    git \
-    curl \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender-dev \
-    libgomp1 \
-    && rm -rf /var/lib/apt/lists/*
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    CUDA_HOME=/usr/local/cuda \
+    # Correct arch syntax for Hopper:
+    TORCH_CUDA_ARCH_LIST="90;90+PTX" \
+    # Do NOT bake device selection into the image
+    TRT_VERSION=10.5.0 \
+    CUDA_MODULE_LOADING=LAZY \
+    TORCH_CUDNN_V8_API_ENABLED=1 \
+    CUBLAS_WORKSPACE_CONFIG=:4096:8 \
+    CUDA_LAUNCH_BLOCKING=0 \
+    CUDA_CACHE_DISABLE=0 \
+    TRT_SUPPRESS_CUDA_WARNINGS=1 \
+    HF_HUB_ENABLE_HF_TRANSFER=1
 
-# Install uv
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
-    cp /root/.local/bin/uv /usr/local/bin/uv
-ENV PATH="/root/.local/bin:$PATH"
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 python3-dev python3-pip \
+    git wget vim build-essential ninja-build \
+    libgl1-mesa-glx libglib2.0-0 libsm6 libxext6 libxrender-dev \
+    libgomp1 libgstreamer1.0-0 libgstreamer-plugins-base1.0-0 \
+    ffmpeg curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+RUN python3.10 -m pip install --no-cache-dir --upgrade pip uv
 
-# Copy requirements first for better caching
+WORKDIR /workspace
+
+# EXACT host Torch matrix
+RUN python3.10 -m pip install --no-cache-dir \
+    torch==2.6.0+cu124 torchvision==0.21.0+cu124 \
+    --index-url https://download.pytorch.org/whl/cu124
+
+# Make sure torchao is present (needed by your training path)
+RUN python3.10 -m pip install --no-cache-dir torchao==0.9.0
+
+# Verify CUDA works (optional but useful for debugging)
+RUN python3.10 - <<'PY'
+import torch
+print("PyTorch:", torch.__version__)
+print("CUDA available:", torch.cuda.is_available())
+print("CUDA version:", torch.version.cuda)
+PY
+
+# EXACT TRT
+RUN python3.10 -m pip install --no-cache-dir tensorrt==10.5.0 polygraphy>=0.50
+
+# Filter out ONLY torch, torchvision, TensorRT family, and flash-attn
 COPY requirements.txt .
+RUN awk 'BEGIN{IGNORECASE=1} \
+  !/^(torch($|[[:space:]=<>]))/ && \
+  !/^(torchvision($|[[:space:]=<>]))/ && \
+  !/^(tensorrt($|[[:space:]=<>])|tensorrt-cu12-(bindings|libs)($|[[:space:]=<>]))/ && \
+  !/^(flash[-_]attn($|[[:space:]=<>]))/ \
+  {print}' requirements.txt > /tmp/req.filtered
 
-# Install dependencies with uv
-RUN uv venv && \
-    . .venv/bin/activate && \
-    uv pip install -r requirements.txt
+# Install the rest
+RUN python3.10 -m pip install --no-cache-dir -r /tmp/req.filtered
 
-# Copy application code
+# App
 COPY training_server.py .
 COPY config_generator.py .
 COPY run.py .
@@ -37,14 +67,14 @@ COPY info.py .
 COPY toolkit/ ./toolkit/
 COPY extensions_built_in/ ./extensions_built_in/
 COPY jobs/ ./jobs/
+COPY trt.py .
+COPY lora_generate_image.py .
+COPY miner_server.py .
+COPY scripts/ ./scripts/
 
-# Set environment variables
-ENV VIRTUAL_ENV=/app/.venv
-ENV PATH="/app/.venv/bin:$PATH"
-ENV PYTHONUNBUFFERED=1
+RUN chmod +x scripts/*.sh
+RUN mkdir -p /trt-cache /app/output /app/datasets /app/config /app/models
 
-# Expose the API port
 EXPOSE 8091
 
-# Run the miner axon
-CMD ["python", "training_server.py"]
+CMD ["python3", "miner_server.py"]

@@ -22,9 +22,11 @@ Before running this miner, you must:
 
 ## Quick Start
 
-### One-Command Setup
+### Choose Your Deployment Mode
 
-The easiest way to get started is using the Makefile:
+The miner can run in two modes:
+- **Inference Mode**: Serves pre-trained models with TensorRT acceleration
+- **Training Mode**: Fine-tunes LoRA models on FLUX.1-dev
 
 ```bash
 # 1. Clone the repository
@@ -35,33 +37,39 @@ cd dippy-studio-bittensor-miner
 cp .env.example .env
 # Edit .env and add your HF_TOKEN
 
-# 3. Run complete setup (builds everything and starts miner)
-make full-setup
+# 3. Choose your deployment mode:
+
+# For INFERENCE only (requires TRT engines)
+make setup-inference
+
+# For TRAINING only (requires base model)
+make setup-training
 
 # 4. Check logs
 make logs
 ```
 
-That's it! The miner server will be available at `http://localhost:8091`.
+The miner server will be available at `http://localhost:8091`.
 
 ### Available Make Commands
 
 ```bash
-# Quick Start
-make full-setup    # Complete setup: build images, TRT engine, and start miner
-make help          # Show all available commands
+# Deployment Modes
+make setup-inference  # Deploy inference-only server (auto-builds TRT if needed)
+make setup-training   # Deploy training-only server
 
-# Individual Steps
-make build         # Build/rebuild Docker images
-make trt-build     # Build TRT engine (skips if exists)
-make trt-rebuild   # Force rebuild TRT engine
-make up            # Start miner service
-make down          # Stop miner service
-make logs          # Follow miner logs
-make restart       # Restart miner service
+# Building & Management
+make build            # Build Docker images
+make trt-build        # Build TRT engine (20-30 min)
+make trt-rebuild      # Force rebuild TRT engine
+make up               # Start miner service
+make down             # Stop miner service
+make logs             # Follow miner logs
+make restart          # Restart miner service
 
 # Maintenance
-make clean-cache   # Remove all cached TRT engines (requires confirmation)
+make clean-cache      # Remove all cached TRT engines
+make help             # Show all available commands
 ```
 
 ## Architecture
@@ -82,12 +90,12 @@ The reverse proxy handles Bittensor authentication and routes requests to intern
    python server.py
    ```
 
-### 2. Miner Server (Combined Training & Inference)
-A unified FastAPI server (`miner_server.py`) that handles both LoRA training and TensorRT inference.
+### 2. Miner Server (Separate Training & Inference Modes)
+A FastAPI server (`miner_server.py`) that can run in either training or inference mode.
 
 **Features:**
-- **Training**: Background LoRA fine-tuning with HuggingFace upload
-- **Inference**: TensorRT-accelerated image generation with LoRA support
+- **Training Mode**: Background LoRA fine-tuning with HuggingFace upload
+- **Inference Mode**: TensorRT-accelerated image generation with LoRA support and automatic engine preloading
 - **Static file serving**: Direct image URL access
 
 **Endpoints:**
@@ -121,9 +129,9 @@ Create a `.env` file in the project root:
 # Required
 HF_TOKEN=your_huggingface_token_here        # HuggingFace token with write permissions
 
-# Optional (with defaults)
-ENABLE_TRAINING=true                        # Enable training endpoints
-ENABLE_INFERENCE=true                       # Enable inference endpoints
+# Mode Configuration (set based on deployment choice)
+ENABLE_TRAINING=true                        # Set to false for inference-only mode
+ENABLE_INFERENCE=true                       # Set to false for training-only mode
 MODEL_PATH=black-forest-labs/FLUX.1-dev    # Base model path
 OUTPUT_DIR=/app/output                      # Output directory in container (mapped to ./output on host)
 MINER_SERVER_PORT=8091                      # Server port
@@ -274,9 +282,9 @@ If you encounter permission errors downloading FLUX.1-dev:
 
 ### GPU Memory Issues
 If training fails with CUDA out of memory:
-1. Reduce batch size in configuration
-2. Enable gradient checkpointing
-3. Ensure TRT server is unloaded during training
+1. Use separate deployment modes (inference OR training, not both)
+2. Reduce batch size in configuration
+3. Enable gradient checkpointing
 4. Use a GPU with more VRAM
 
 ### Docker Issues

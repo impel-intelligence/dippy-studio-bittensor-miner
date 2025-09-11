@@ -4,6 +4,7 @@ import json
 import asyncio
 import threading
 import uuid
+import time
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, Any, List
@@ -54,23 +55,22 @@ class InferenceRequestModel(BaseModel):
 class ServerConfig(BaseModel):
     enable_training: bool = Field(default=True, description="Enable training endpoints")
     enable_inference: bool = Field(default=True, description="Enable TRT inference endpoints")
-    training_port: int = Field(default=8091, description="Port for training API")
-    inference_port: int = Field(default=8092, description="Port for inference API")
     trt_engine_path: Optional[str] = Field(default=None, description="Path to TRT engine")
     model_path: str = Field(default="black-forest-labs/FLUX.1-dev", description="Base model path")
     output_dir: str = Field(default="./output", description="Output directory")
+    preload_engines: bool = Field(default=True, description="Preload TRT engines at startup")
 
 def load_trt_server():
-    """Lazily load TRT server when needed"""
+    """Load TRT server (called at startup or lazily)"""
     global trt_server
 
     if trt_server is not None:
-        return  # Already loaded
+        return trt_server  # Already loaded
 
     config = app.state.config
     if config.enable_inference and config.trt_engine_path:
         try:
-            logger.info("Lazy-loading TRT inference server...")
+            logger.info("Initializing TRT inference server...")
             trt_server = TRTInferenceServer(
                 base_model_path=config.model_path,
                 engine_path=config.trt_engine_path,
@@ -79,9 +79,11 @@ def load_trt_server():
             # Start the inference server in background
             trt_server.start()
             logger.info("TRT inference server loaded successfully")
+            return trt_server
         except Exception as e:
             logger.error(f"Failed to load TRT inference server: {e}")
             raise
+    return None
 
 def unload_trt_server():
     """Unload TRT server to free GPU memory"""
@@ -103,14 +105,42 @@ def unload_trt_server():
         except Exception as e:
             logger.error(f"Error unloading TRT server: {e}")
 
+async def preload_trt_engines():
+    """Preload TRT engines at startup"""
+    config = app.state.config
+    
+    if not config.preload_engines or not config.enable_inference:
+        logger.info("Engine preloading disabled, will load on first request")
+        return
+    
+    if not config.trt_engine_path:
+        logger.warning("No TRT engine path specified, skipping preload")
+        return
+        
+    try:
+        logger.info("Preloading TRT engines at startup...")
+        start_time = time.time()
+        
+        # Load TRT server synchronously during startup
+        server = load_trt_server()
+        if server is None:
+            logger.warning("TRT server could not be loaded")
+            return
+        
+        logger.info(f"TRT engines preloaded in {time.time() - start_time:.2f}s")
+        
+    except Exception as e:
+        logger.error(f"Failed to preload TRT engines: {e}")
+
 async def initialize_servers():
-    # Store config globally but don't initialize TRT yet
+    # Store config globally
     config = ServerConfig(
         enable_training=os.getenv("ENABLE_TRAINING", "true").lower() == "true",
         enable_inference=os.getenv("ENABLE_INFERENCE", "true").lower() == "true",
         trt_engine_path=os.getenv("TRT_ENGINE_PATH", "/app/trt/transformer.plan"),
         model_path=os.getenv("MODEL_PATH", "black-forest-labs/FLUX.1-dev"),
-        output_dir=os.getenv("OUTPUT_DIR", "./output")
+        output_dir=os.getenv("OUTPUT_DIR", "./output"),
+        preload_engines=os.getenv("PRELOAD_ENGINES", "true").lower() == "true"
     )
 
     # Create output directory if it doesn't exist
@@ -133,7 +163,9 @@ async def initialize_servers():
 
     logger.info(f"Server initialized. Output directory: {config.output_dir}")
     logger.info(f"Service URL: {app.state.SERVICE_URL}")
-    logger.info("TRT will be loaded on first inference request.")
+    
+    # Start TRT engine preloading if enabled
+    await preload_trt_engines()
 
     return config
 
@@ -289,7 +321,7 @@ async def notify_validator(endpoint: str, job_id: str, status: str, output_path:
 
 @app.post("/inference")
 async def generate_image(request: InferenceRequestModel):
-    # Lazy-load TRT server on first inference request
+    # Ensure TRT server is loaded
     if trt_server is None:
         try:
             load_trt_server()
@@ -422,12 +454,27 @@ async def list_jobs(job_type: Optional[str] = None):
 
 @app.get("/health")
 async def health_check():
+    config = app.state.config
+    trt_status = "disabled"
+    
+    if config.enable_inference:
+        if trt_server is not None:
+            trt_status = "loaded"
+        elif config.preload_engines:
+            trt_status = "preloading"  # May still be loading in background
+        else:
+            trt_status = "lazy_load_enabled"
+    
     status = {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "services": {
-            "training": "enabled",
-            "inference": "enabled" if trt_server is not None else "disabled"
+            "training": "enabled" if config.enable_training else "disabled",
+            "inference": trt_status
+        },
+        "config": {
+            "preload_engines": config.preload_engines,
+            "engine_path": config.trt_engine_path
         }
     }
 
@@ -435,6 +482,7 @@ async def health_check():
         status["services"]["trt_engine"] = "loaded"
 
     return status
+
 
 @app.get("/")
 async def root():
@@ -453,7 +501,8 @@ async def root():
             },
             "general": {
                 "GET /jobs": "List all jobs",
-                "GET /health": "Health check"
+                "GET /health": "Health check",
+                "GET /engine/status": "Detailed engine status"
             }
         }
     }

@@ -107,7 +107,7 @@ async def proxy_training_request(
     authenticated: bool = Depends(verify_epistula_auth)
 ):
     """Proxy training requests to the training server."""
-    training_server_url = os.getenv("TRAINING_SERVER_URL", "http://localhost:7000")
+    training_server_url = os.getenv("TRAINING_SERVER_URL", "http://localhost:8091")
     # Forward the request to the training server
     async with httpx.AsyncClient() as client:
         try:
@@ -143,7 +143,7 @@ async def proxy_inference_request(
     authenticated: bool = Depends(verify_epistula_auth)
 ):
     """Proxy inference requests to the inference server."""
-    inference_server_url = os.getenv("INFERENCE_SERVER_URL", "http://localhost:7001")
+    inference_server_url = os.getenv("INFERENCE_SERVER_URL", "http://localhost:8091")
     
     # Forward the request to the inference server
     async with httpx.AsyncClient() as client:

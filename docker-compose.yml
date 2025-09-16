@@ -58,6 +58,7 @@ services:
       - ./output:/workspace/output  # Training saves here (working directory)
       - ./config:/app/config
       - ./models:/app/models
+      - ./loras:/app/loras  # Mount directory for LoRA weights
       - ./trt-cache:/trt-cache
       - ~/.cache/huggingface:/root/.cache/huggingface
     restart: unless-stopped

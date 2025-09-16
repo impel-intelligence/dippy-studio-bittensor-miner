@@ -15,7 +15,7 @@ os.environ['TQDM_DISABLE'] = '1'
 import torch
 from diffusers import DiffusionPipeline
 
-from trt import TRTTransformer, TRTRefitter, export_fused_transformer
+from trt import TRTTransformer, TRTRefitter
 
 
 if __name__ == '__main__' and False:
@@ -173,8 +173,8 @@ class TRTInferenceServer:
     def _weight_loader_worker(self):
         """
         [Producer Thread]
-        Pulls requests, loads the corresponding state_dict from disk into CPU
-        memory, and passes it to the inference queue.
+        Pulls requests, loads the corresponding LoRA weights (if any) and
+        applies them to the base model, then passes it to the inference queue.
         """
         while True:
             transformer, refitter = self.engine_queue.get()
@@ -186,11 +186,11 @@ class TRTInferenceServer:
                 self.request_queue.task_done()
                 break
 
-            print(f"[Loader] Loading weights for {request.lora_path}")
+            print(f"[Loader] Preparing weights for {request.lora_path if request.lora_path else 'base model'}")
             with nvtx_range(f"prepare_{request.name}"):
-                if request.lora_path != "":
-                    refitter.prepare_lora_refit(request.lora_path)
-                    refitter.commit_refit()
+                # Apply LoRA if provided, otherwise use base weights
+                refitter.prepare_lora_refit(request.lora_path, lora_scale=1.0)
+                refitter.commit_refit()
 
             self.inference_queue.put((request, transformer, refitter))
             self.engine_queue.task_done()
@@ -211,7 +211,7 @@ class TRTInferenceServer:
 
             request, transformer, refitter = job
             # Commit refit and run inference (GPU-bound).
-            print(f"[Inference] Committing and running inference for {request.lora_path}")
+            print(f"[Inference] Running inference for {request.lora_path if request.lora_path else 'base model'}")
             inference_start_time = time.time()
 
             with nvtx_range(f"swap_{request.name}"):

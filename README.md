@@ -10,7 +10,7 @@ A specialized Bittensor subnet miner (subnet 231 on testnet) for AI model traini
 
 You will need access to a H100 GPU PCIe with the following configuration:
 ```
-NVIDIA-SMI 570.172.08             Driver Version: 570.172.08     CUDA Version: 12.8     
+NVIDIA-SMI 570.172.08             Driver Version: 570.172.08     CUDA Version: 12.8
 ```
 For managing python installation, we recommend [uv](https://docs.astral.sh/uv/getting-started/installation/) and only officially support this configuration.
 
@@ -125,6 +125,35 @@ make trt-rebuild   # Force rebuild
 # Or Docker directly
 docker compose run --rm trt-builder
 ```
+
+## Async Inference E2E Test
+
+Follow `docs/async_inference_e2e.md` for a walkthrough of the new async inference test harness, including how to launch the reference callback server and run checks via `pytest` or `python -m tests.e2e.async_inference.cli run`.
+
+**Quick start (host execution)**
+
+```bash
+pip install -r requirements_test_async.txt
+export ASYNC_MINER_URL=http://localhost:8091
+export ASYNC_CALLBACK_BASE_URL=http://127.0.0.1:8092
+pytest tests/e2e/async_inference/test_async_inference.py -s
+```
+
+**Running against a miner in Docker**
+
+The container cannot reach `127.0.0.1` on the host. Use an address the container can see (for example the `docker0` gateway on Linux):
+
+```bash
+pip install -r requirements_test_async.txt
+export ASYNC_MINER_URL=http://localhost:8091
+export ASYNC_CALLBACK_BASE_URL=http://172.17.0.1:8092
+export ASYNC_CALLBACK_BIND_HOST=0.0.0.0                 # ensure the mock callback server listens externally
+pytest tests/e2e/async_inference/test_async_inference.py -s
+```
+
+Run `ip addr show docker0` and use the `inet` value (typically `172.17.0.1`) for `ASYNC_CALLBACK_BASE_URL`.
+
+Expose the same `ASYNC_CALLBACK_BASE_URL` (and optionally `ASYNC_CALLBACK_BIND_HOST`) to the miner service via your `.env` or compose file, then restart the container so it picks up the new settings.
 
 ## Configuration
 
@@ -256,7 +285,7 @@ curl http://localhost:8091/inference/status/{job_id}
 ## System Requirements
 - H100 PCIe with the following specific `nvidia-smi` configuration. See below for reference:
 ```
-NVIDIA-SMI 570.172.08             Driver Version: 570.172.08     CUDA Version: 12.8     
+NVIDIA-SMI 570.172.08             Driver Version: 570.172.08     CUDA Version: 12.8
 ```
 - **GPU**: NVIDIA H100 GPU PCIe configuration
 - **CUDA**: Version 12.8 Specifically

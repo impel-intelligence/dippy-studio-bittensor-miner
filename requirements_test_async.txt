@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+aiohttp
+python-multipart
+requests
+pytest
+pytest-asyncio

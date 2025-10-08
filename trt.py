@@ -63,49 +63,6 @@ def nvtx_range(msg):
         torch.cuda.nvtx.range_pop()
 
 
-def export_fused_transformer(
-    base_model_path: str,
-    lora_path: str,
-    output_path: str,
-    lora_scale: float = 1.0
-):
-    """
-    Loads a base diffusion pipeline, fuses a LoRA into it, and saves the
-    resulting fused pipeline to a new directory.
-
-    Args:
-        base_model_path (str):
-            Path to the pre-trained base model (e.g., './baseflux').
-        lora_path (str):
-            Path to the LoRA weights file (e.g., 'lora.safetensors').
-        output_path (str):
-            Path to the file where the fused transformer state-dict will be saved.
-        lora_scale (float, optional):
-            The weight to apply to the LoRA during fusion. Defaults to 1.0.
-    """
-    print(f"\n[1/3] Loading base model '{base_model_path}' onto GPU...")
-    pipe = DiffusionPipeline.from_pretrained(
-        base_model_path,
-        torch_dtype=torch.float16,
-        low_cpu_mem_usage=True,
-    ).to("cuda")
-    print("      Base model loaded successfully.")
-
-    if lora_path:
-        print(f"\n[2/3] Loading and fusing LoRA '{os.path.basename(lora_path)}'...")
-        pipe.load_lora_weights(lora_path)
-        pipe.fuse_lora(lora_scale=lora_scale)
-        pipe.unload_lora_weights()
-        print(f"      LoRA fused successfully with a scale of {lora_scale}.")
-
-    print(f"\n[3/3] Saving fused pipeline to '{output_path}'...")
-    torch.save(pipe.transformer.state_dict(), output_path)
-    print("      Fused pipeline saved successfully.")
-
-    del pipe
-    torch.cuda.empty_cache()
-    print("\n--- LoRA fusion export finished successfully! ---")
-
 
 class ONNXSafeRMSNorm(torch.nn.Module):
     def __init__(self, module: RMSNorm):
@@ -563,27 +520,87 @@ class DiffusionTransformer(BaseModel):
 class TRTRefitter:
     def __init__(self, engine, flux_path):
         self.refitter = trt.Refitter(engine, TRT_LOGGER)
+        self.base_weights = {}
+        
+        # Load and store base model weights
         transformer_sd = DiffusionPipeline.from_pretrained(flux_path, torch_dtype=torch.float16).transformer.state_dict()
         for trt_weight_name in self.refitter.get_all_weights():
             pyt_weight_name = trt_weight_name.replace('transformer.', '').replace('base_layer.', '')
             if pyt_weight_name in transformer_sd:
+                weight = transformer_sd[pyt_weight_name].numpy()
+                self.base_weights[trt_weight_name] = weight
                 self.refitter.set_named_weights(
                     trt_weight_name,
-                    trt.Weights(transformer_sd[pyt_weight_name].numpy())
+                    trt.Weights(weight)
                 )
 
-    def prepare_lora_refit(self, lora_path):
+    def prepare_lora_refit(self, lora_path, lora_scale=1.0):
+        """Apply LoRA weights directly to base weights without fusion.
+        
+        Args:
+            lora_path: Path to LoRA safetensors file
+            lora_scale: Scale factor for LoRA weights (default 1.0)
+        """
         from safetensors.torch import load_file
-        lora_sd = load_file(lora_path)
-        start_time = time.time()
-        for trt_weight_name in self.refitter.get_all_weights():
-            if '.lora.' in trt_weight_name:
-                pyt_weight_name = trt_weight_name.replace('.lora.weight', '.weight')
+        import numpy as np
+        
+        if not lora_path or lora_path == "":
+            # Reset to base weights if no LoRA provided
+            start_time = time.time()
+            for trt_weight_name, base_weight in self.base_weights.items():
                 self.refitter.set_named_weights(
                     trt_weight_name,
-                    trt.Weights(lora_sd[pyt_weight_name].numpy())
+                    trt.Weights(base_weight)
                 )
-        print(f"--- LoRA prep in {time.time() - start_time:.4f} seconds ---")
+            print(f"--- Reset to base weights in {time.time() - start_time:.4f} seconds ---")
+            return
+        
+        lora_sd = load_file(lora_path)
+        start_time = time.time()
+        
+        # Group LoRA weights by layer
+        lora_weights_by_layer = {}
+        for key in lora_sd.keys():
+            if 'lora_A' in key or 'lora_B' in key:
+                # Extract base layer name
+                base_name = key.replace('.lora_A.weight', '').replace('.lora_B.weight', '')
+                if base_name not in lora_weights_by_layer:
+                    lora_weights_by_layer[base_name] = {}
+                
+                if 'lora_A' in key:
+                    lora_weights_by_layer[base_name]['A'] = lora_sd[key].numpy()
+                else:
+                    lora_weights_by_layer[base_name]['B'] = lora_sd[key].numpy()
+        
+        # Apply LoRA to base weights
+        for trt_weight_name, base_weight in self.base_weights.items():
+            pyt_weight_name = trt_weight_name.replace('transformer.', '').replace('base_layer.', '')
+            
+            # Check if this layer has LoRA weights
+            if pyt_weight_name in lora_weights_by_layer:
+                lora_layer = lora_weights_by_layer[pyt_weight_name]
+                if 'A' in lora_layer and 'B' in lora_layer:
+                    # Apply LoRA: W_new = W_base + scale * (B @ A)
+                    lora_delta = lora_scale * (lora_layer['B'] @ lora_layer['A'])
+                    fused_weight = base_weight + lora_delta.astype(base_weight.dtype)
+                    self.refitter.set_named_weights(
+                        trt_weight_name,
+                        trt.Weights(fused_weight)
+                    )
+                else:
+                    # No LoRA for this layer, use base weight
+                    self.refitter.set_named_weights(
+                        trt_weight_name,
+                        trt.Weights(base_weight)
+                    )
+            else:
+                # No LoRA for this layer, use base weight
+                self.refitter.set_named_weights(
+                    trt_weight_name,
+                    trt.Weights(base_weight)
+                )
+        
+        print(f"--- LoRA application in {time.time() - start_time:.4f} seconds ---")
 
     def prepare_refit(self, state_dict):
         print("--- Starting TensorRT engine refit ---")
@@ -717,7 +734,6 @@ def fp8_filter_func(name: str) -> bool:
 
 def build_transformer_engine_from_pipeline(
     model_path: str,
-    lora_path: str,
     onnx_dir: str,
     engine_dir: str,
     force_engine_rebuild: bool = False,
@@ -729,16 +745,14 @@ def build_transformer_engine_from_pipeline(
     static_shape: bool = False
 ):
     """
-    Loads a fused Diffusers pipeline, extracts its transformer component,
-    and builds a TensorRT engine for it.
+    Loads a base Diffusers pipeline, extracts its transformer component,
+    and builds a TensorRT engine for it. LoRA will be applied dynamically
+    at runtime via the refitter.
     """
-    logger.warning(f"Loading fused pipeline from: {model_path}")
+    logger.warning(f"Loading base pipeline from: {model_path}")
     pipe = DiffusionPipeline.from_pretrained(
         model_path, torch_dtype=torch.float16
     ).to("cuda")
-    if lora_path != "":
-        pipe.load_lora_weights(lora_path, adapter_name="lora")
-        pipe.set_adapters(["lora"], adapter_weights=[1.0])
 
     transformer_model = pipe.transformer
     transformer_model = patch_rms_norm(transformer_model)
@@ -927,8 +941,6 @@ if __name__ == "__main__":
     else:
         logger.warning(f"Using HuggingFace model: {MODEL_PATH}")
     
-    # LORA_PATH = "./output/lora_run_1/lora_run_1.safetensors"
-    LORA_PATH = ""
     ONNX_EXPORT_DIR = "./onnx"
     ENGINE_EXPORT_DIR = "./trt"
 
@@ -937,12 +949,11 @@ if __name__ == "__main__":
     new_limit = min(65536, hard_limit)
     resource.setrlimit(resource.RLIMIT_NOFILE, (new_limit, hard_limit))
 
-    logger.warning("--- Starting Fused Transformer to TensorRT Export ---")
+    logger.warning("--- Starting Base Transformer to TensorRT Export ---")
 
-    # Build engine (function handles both local directories and HuggingFace IDs)
+    # Build engine from base model only (LoRA applied at runtime)
     build_transformer_engine_from_pipeline(
         model_path=MODEL_PATH,
-        lora_path=LORA_PATH,
         onnx_dir=ONNX_EXPORT_DIR,
         engine_dir=ENGINE_EXPORT_DIR,
         force_engine_rebuild=True,

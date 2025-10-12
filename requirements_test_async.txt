@@ -5,3 +5,5 @@ python-multipart
 requests
 pytest
 pytest-asyncio
+numpy
+pillow

@@ -3,6 +3,7 @@ import threading
 import queue
 import time
 import os
+import tempfile
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Optional, Dict
@@ -227,15 +228,32 @@ class TRTInferenceServer:
                     generator=generator
                 ).images[0]
 
+            # Ensure all CUDA operations complete before saving
+            torch.cuda.synchronize()
+
             inference_end_time = time.time()
             print(f"[Inference] Inference for {request.lora_path} took {inference_end_time - inference_start_time:.3f}s")
 
             self.engine_queue.put((transformer, refitter))
 
-            # Save output (I/O-bound)
+            # Save output (I/O-bound) - use atomic write to prevent race condition
             with nvtx_range(f"save_{request.name}"):
-                os.makedirs(os.path.dirname(request.output_path), exist_ok=True)
-                image.save(request.output_path)
+                output_dir = os.path.dirname(request.output_path)
+                os.makedirs(output_dir, exist_ok=True)
+
+                # Write to temp file first, then atomically rename
+                # This ensures the file only appears when fully written
+                with tempfile.NamedTemporaryFile(
+                    mode='wb',
+                    dir=output_dir,
+                    suffix='.png',
+                    delete=False
+                ) as tmp_file:
+                    tmp_path = tmp_file.name
+                    image.save(tmp_path)
+
+                # Atomic rename - file only becomes visible when complete
+                os.replace(tmp_path, request.output_path)
             print(f"[Inference] Saved output to '{request.output_path}'")
 
             self.inference_queue.task_done()
@@ -246,13 +264,13 @@ if __name__ == "__main__":
     # Get model path from environment variable or use HuggingFace model ID
     import os
     base_model_path = os.getenv("MODEL_PATH", "black-forest-labs/FLUX.1-dev")
-    
+
     # Check if MODEL_PATH is a local directory that exists
     if os.path.isdir(base_model_path):
         print(f"Using local model directory: {base_model_path}")
     else:
         print(f"Using HuggingFace model: {base_model_path}")
-    
+
     server = TRTInferenceServer(
         base_model_path=base_model_path,
         engine_path="./trt/transformer.plan",

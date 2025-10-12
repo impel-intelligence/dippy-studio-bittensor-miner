@@ -920,17 +920,17 @@ def torch_to_onnx_map(
 if __name__ == "__main__":
     # Get model path from environment variable or use HuggingFace model ID
     MODEL_PATH = os.getenv("MODEL_PATH", "black-forest-labs/FLUX.1-dev")
-    
+
     # Check if MODEL_PATH is a local directory that exists
     if os.path.isdir(MODEL_PATH):
         logger.warning(f"Using local model directory: {MODEL_PATH}")
     else:
         logger.warning(f"Using HuggingFace model: {MODEL_PATH}")
-    
+
     # LORA_PATH = "./output/lora_run_1/lora_run_1.safetensors"
-    LORA_PATH = ""
-    ONNX_EXPORT_DIR = "./onnx"
-    ENGINE_EXPORT_DIR = "./trt"
+    LORA_PATH = os.getenv("LORA_PATH", "")
+    ONNX_EXPORT_DIR = os.getenv("ONNX_EXPORT_DIR", "./onnx")
+    ENGINE_EXPORT_DIR = os.getenv("ENGINE_EXPORT_DIR", "./trt")
 
     # increase max files open limit (for onnx parsing)
     soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)

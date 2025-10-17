@@ -22,7 +22,7 @@ CONFIG: Optional[Config] = None
 epistula_verifier: Optional[EpistulaVerifier] = None
 
 _CAPACITY_STATE: Dict[str, Any] = {
-    "inference": ["base"],
+    "inference": ["base-h100_pcie","img-h100_pcie"],
     "training": ["H100pcie"],
 }
 
@@ -256,7 +256,7 @@ async def status():
     return {
         "status": "running",
         "service": "bittensor-miner-reverse-proxy",
-        "version": "0.1.0",
+        "version": "0.2.0",
         "epistula_ready": epistula_verifier is not None,
     }
 

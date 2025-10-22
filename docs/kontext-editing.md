@@ -176,14 +176,10 @@ response2 = requests.post("/edit", json={
 
 ## Performance
 
-**PyTorch Implementation (Phase 1):**
+**PyTorch Implementation:**
 - Latency: ~5-15s per edit (512x512, 28 steps)
 - VRAM: ~14GB
 - Can run alongside FLUX.1-dev inference on H100
-
-**TensorRT Migration (Future):**
-- Target latency: <5s
-- Requires determinism validation
 
 ## Testing
 

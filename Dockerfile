@@ -69,6 +69,7 @@ COPY extensions_built_in/ ./extensions_built_in/
 COPY jobs/ ./jobs/
 COPY trt.py .
 COPY lora_generate_image.py .
+COPY kontext_pipeline.py .
 COPY miner_server.py .
 COPY scripts/ ./scripts/
 

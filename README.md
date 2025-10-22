@@ -58,12 +58,64 @@ make logs
 
 The miner server will be available at `http://localhost:8091`.
 
+## Image Editing with FLUX.1-Kontext-dev
+
+The miner now supports deterministic image editing using FLUX.1-Kontext-dev.
+
+### Enable Kontext Editing
+
+```bash
+# Quick setup
+make setup-kontext
+
+# Or manually
+echo "ENABLE_KONTEXT_EDIT=true" >> .env
+make restart
+```
+
+### Usage Example
+
+```bash
+# Edit an image
+curl -X POST http://localhost:8091/edit \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Add a red hat to the person",
+    "image_b64": "base64_encoded_image_data",
+    "seed": 42,
+    "guidance_scale": 2.5,
+    "num_inference_steps": 28
+  }'
+
+# Check status
+curl http://localhost:8091/edit/status/{job_id}
+
+# Download result
+curl http://localhost:8091/edit/result/{job_id} -o edited.png
+```
+
+### Determinism Testing
+
+```bash
+# Run E2E tests (local miner)
+export ENABLE_KONTEXT_EDIT=true
+pytest tests/e2e/kontext_determinism/ -v -m e2e
+
+# Or use make command
+make test-kontext-determinism
+```
+
+**For Docker-based testing**, see [tests/e2e/kontext_determinism/README.md](tests/e2e/kontext_determinism/README.md) for network configuration.
+
+See [docs/kontext-editing.md](docs/kontext-editing.md) for full API documentation including async callbacks.
+
 ### Available Make Commands
 
 ```bash
 # Deployment Modes
 make setup-inference  # Deploy inference-only server (auto-builds TRT if needed)
 make setup-training   # Deploy training-only server
+make setup-kontext    # Deploy with FLUX.1-Kontext-dev editing enabled
 
 # Building & Management
 make build            # Build Docker images
@@ -73,6 +125,10 @@ make up               # Start miner service
 make down             # Stop miner service
 make logs             # Follow miner logs
 make restart          # Restart miner service
+
+# Testing
+make test-kontext-determinism  # Run Kontext determinism E2E tests
+make test-kontext-unit         # Run Kontext unit tests
 
 # Maintenance
 make clean-cache      # Remove all cached TRT engines
@@ -107,10 +163,13 @@ A FastAPI server (`miner_server.py`) that can run in either training or inferenc
 
 **Endpoints:**
 - `POST /train` - Submit LoRA training job
-- `POST /inference` - Generate image (with optional LoRA)
+- `POST /inference` - Generate image (with optional LoRA and callback support)
+- `POST /edit` - Edit image with FLUX.1-Kontext-dev (with callback support)
 - `GET /training/status/{job_id}` - Check training status
 - `GET /inference/status/{job_id}` - Check inference status
+- `GET /edit/status/{job_id}` - Check edit job status
 - `GET /inference/result/{job_id}` - Download generated image
+- `GET /edit/result/{job_id}` - Download edited image
 - `GET /health` - Health check
 
 ### 3. TensorRT Engine
@@ -287,10 +346,10 @@ curl http://localhost:8091/inference/status/{job_id}
 ```
 NVIDIA-SMI 570.172.08             Driver Version: 570.172.08     CUDA Version: 12.8
 ```
-- **GPU**: NVIDIA H100 GPU PCIe configuration
+- **GPU**: NVIDIA H100 GPU PCIe (80GB VRAM supports both FLUX.1-dev + Kontext simultaneously)
 - **CUDA**: Version 12.8 Specifically
 - **RAM**: 32GB minimum
-- **Storage**: 100GB+ for model weights and training data
+- **Storage**: 100GB+ for model weights (FLUX.1-dev + Kontext models)
 - **Docker**: Latest version with nvidia-container-toolkit
 
 ## Monitoring and Logs

@@ -12,15 +12,19 @@ from enum import Enum
 import subprocess
 import requests
 import aiohttp
+import base64
+from io import BytesIO
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import uvicorn
+from PIL import Image
 
 from config_generator import generate_training_config, cleanup_job_files
 from lora_generate_image import TRTInferenceServer, InferenceRequest
+from kontext_pipeline import KontextInferenceManager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -32,9 +36,11 @@ app = FastAPI(
 )
 
 trt_server: Optional[TRTInferenceServer] = None
+kontext_manager: Optional[KontextInferenceManager] = None
 training_executor = ThreadPoolExecutor(max_workers=2)
 inference_jobs: Dict[str, Dict[str, Any]] = {}
 training_jobs: Dict[str, Dict[str, Any]] = {}
+edit_jobs: Dict[str, Dict[str, Any]] = {}
 
 class TrainingRequest(BaseModel):
     job_type: str = "lora_training"
@@ -64,9 +70,51 @@ class InferenceRequestModel(BaseModel):
         description="ISO 8601 timestamp (UTC) after which callbacks are skipped"
     )
 
+class EditRequest(BaseModel):
+    """Request model for image editing with FLUX.1-Kontext-dev"""
+    prompt: str = Field(..., description="Text instruction for editing the image")
+    image_b64: Optional[str] = Field(
+        default=None,
+        description="Base64 encoded input image (PNG/JPEG)"
+    )
+    reference_job_id: Optional[str] = Field(
+        default=None,
+        description="Job ID of previous inference/edit to use as input"
+    )
+    seed: int = Field(..., description="Random seed (required for determinism)")
+    guidance_scale: float = Field(
+        default=2.5,
+        ge=1.0,
+        le=20.0,
+        description="How strongly to follow the prompt"
+    )
+    num_inference_steps: int = Field(
+        default=28,
+        ge=1,
+        le=100,
+        description="Number of denoising steps"
+    )
+    job_id: Optional[str] = Field(
+        default=None,
+        description="Optional job ID (auto-generated if not provided)"
+    )
+    callback_url: Optional[str] = Field(
+        default=None,
+        description="HTTP endpoint that receives the edited image"
+    )
+    callback_secret: Optional[str] = Field(
+        default=None,
+        description="Secret forwarded via X-Callback-Secret header"
+    )
+    expiry: Optional[datetime] = Field(
+        default=None,
+        description="ISO 8601 timestamp (UTC) after which callbacks are skipped"
+    )
+
 class ServerConfig(BaseModel):
     enable_training: bool = Field(default=True, description="Enable training endpoints")
     enable_inference: bool = Field(default=True, description="Enable TRT inference endpoints")
+    enable_kontext_edit: bool = Field(default=False, description="Enable Kontext image editing endpoints")
     trt_engine_path: Optional[str] = Field(default=None, description="Path to TRT engine")
     model_path: str = Field(default="black-forest-labs/FLUX.1-dev", description="Base model path")
     output_dir: str = Field(default="./output", description="Output directory")
@@ -190,6 +238,91 @@ async def dispatch_callback(
             "payload_status": status.value
         }
 
+def decode_base64_image(b64_data: str) -> Image.Image:
+    """
+    Decode base64 string to PIL Image.
+
+    Args:
+        b64_data: Base64 encoded image data
+
+    Returns:
+        PIL Image
+
+    Raises:
+        HTTPException: If base64 is invalid or not an image
+    """
+    try:
+        image_bytes = base64.b64decode(b64_data)
+        image = Image.open(BytesIO(image_bytes))
+        return image
+    except base64.binascii.Error as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid base64 encoding: {str(e)}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to decode image: {str(e)}"
+        )
+
+
+def load_edit_input_image(
+    reference_job_id: Optional[str],
+    image_b64: Optional[str],
+    output_dir: str
+) -> tuple[Image.Image, str]:
+    """
+    Load input image from reference job or base64 data.
+
+    Priority: reference_job_id > image_b64
+    Falls back to image_b64 if reference not found.
+
+    Args:
+        reference_job_id: Optional job ID to load image from
+        image_b64: Optional base64 encoded fallback image
+        output_dir: Output directory containing job images
+
+    Returns:
+        Tuple of (image, source) where source is "reference" or "base64"
+
+    Raises:
+        HTTPException: If no valid image source available
+    """
+    # Try reference job first
+    if reference_job_id:
+        # Check both inference and edit output directories
+        inference_path = Path(output_dir) / f"{reference_job_id}.png"
+        edit_path = Path(output_dir) / "edits" / f"{reference_job_id}.png"
+
+        if inference_path.exists():
+            logger.info(f"Loading reference image from inference: {reference_job_id}")
+            return Image.open(inference_path), "reference_inference"
+        elif edit_path.exists():
+            logger.info(f"Loading reference image from edit: {reference_job_id}")
+            return Image.open(edit_path), "reference_edit"
+        elif image_b64:
+            logger.warning(
+                f"Reference job {reference_job_id} not found, falling back to image_b64"
+            )
+            return decode_base64_image(image_b64), "base64_fallback"
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Reference job {reference_job_id} image not found and no fallback image_b64 provided"
+            )
+
+    # No reference, use base64
+    if image_b64:
+        logger.info("Loading image from base64 data")
+        return decode_base64_image(image_b64), "base64"
+
+    # No valid source
+    raise HTTPException(
+        status_code=400,
+        detail="Either reference_job_id or image_b64 is required"
+    )
+
 def load_trt_server():
     """Load TRT server (called at startup or lazily)"""
     global trt_server
@@ -221,6 +354,28 @@ def load_trt_server():
             logger.error(f"Failed to load TRT inference server: {e}")
             raise
     return None
+
+def get_kontext_manager() -> Optional[KontextInferenceManager]:
+    """Get or create Kontext inference manager (lazy loading)."""
+    global kontext_manager
+
+    if kontext_manager is not None:
+        return kontext_manager
+
+    config = app.state.config
+    if not config.enable_kontext_edit:
+        logger.info("Kontext editing is disabled")
+        return None
+
+    try:
+        logger.info("Initializing Kontext inference manager...")
+        model_path = os.getenv("KONTEXT_MODEL_PATH", "black-forest-labs/FLUX.1-Kontext-dev")
+        kontext_manager = KontextInferenceManager(model_path=model_path)
+        logger.info("Kontext inference manager initialized (lazy load)")
+        return kontext_manager
+    except Exception as e:
+        logger.error(f"Failed to initialize Kontext manager: {e}")
+        raise
 
 def unload_trt_server():
     """Unload TRT server to free GPU memory"""
@@ -274,14 +429,16 @@ async def initialize_servers():
     config = ServerConfig(
         enable_training=os.getenv("ENABLE_TRAINING", "true").lower() == "true",
         enable_inference=os.getenv("ENABLE_INFERENCE", "true").lower() == "true",
+        enable_kontext_edit=os.getenv("ENABLE_KONTEXT_EDIT", "false").lower() == "true",
         trt_engine_path=os.getenv("TRT_ENGINE_PATH", "/app/trt/transformer.plan"),
         model_path=os.getenv("MODEL_PATH", "black-forest-labs/FLUX.1-dev"),
         output_dir=os.getenv("OUTPUT_DIR", "./output"),
         preload_engines=os.getenv("PRELOAD_ENGINES", "true").lower() == "true"
     )
 
-    # Create output directory if it doesn't exist
+    # Create output directories
     Path(config.output_dir).mkdir(parents=True, exist_ok=True)
+    Path(config.output_dir).joinpath("edits").mkdir(parents=True, exist_ok=True)
 
     # Store config for later use
     app.state.config = config
@@ -664,6 +821,213 @@ async def get_inference_result(job_id: str):
         filename=f"{job_id}.png"
     )
 
+@app.post("/edit")
+async def create_edit_job(request: EditRequest, background_tasks: BackgroundTasks):
+    """
+    Create image editing job with FLUX.1-Kontext-dev.
+
+    Requires deterministic seed for reproducible edits.
+    Supports both direct image_b64 input and reference_job_id chaining.
+    """
+    config = app.state.config
+    if not config.enable_kontext_edit:
+        raise HTTPException(
+            status_code=503,
+            detail="Kontext image editing is currently disabled"
+        )
+
+    # Generate job ID if not provided
+    job_id = request.job_id or f"edit-{str(uuid.uuid4())}"
+
+    # Check for duplicate job
+    if job_id in edit_jobs:
+        existing = edit_jobs[job_id]
+        if existing.get("status") not in {"completed", "failed"}:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Job {job_id} already exists with status {existing.get('status')}"
+            )
+
+    # Load input image (validates reference_job_id or image_b64)
+    try:
+        input_image, image_source = load_edit_input_image(
+            reference_job_id=request.reference_job_id,
+            image_b64=request.image_b64,
+            output_dir=app.state.OUTPUT_DIR
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to load input image: {str(e)}")
+
+    # Create job record
+    now_iso = datetime.now(timezone.utc).isoformat()
+    edit_jobs[job_id] = {
+        "id": job_id,
+        "status": "queued",
+        "queued_at": now_iso,
+        "request": {
+            "prompt": request.prompt,
+            "reference_job_id": request.reference_job_id,
+            "image_source": image_source,
+            "seed": request.seed,
+            "guidance_scale": request.guidance_scale,
+            "num_inference_steps": request.num_inference_steps,
+            "callback_url": request.callback_url,
+            "callback_secret_provided": bool(request.callback_secret),
+            "expiry": request.expiry.isoformat() if request.expiry else None
+        }
+    }
+
+    # Queue background task
+    background_tasks.add_task(
+        run_edit_job,
+        job_id=job_id,
+        prompt=request.prompt,
+        image=input_image,
+        seed=request.seed,
+        guidance_scale=request.guidance_scale,
+        num_inference_steps=request.num_inference_steps,
+        callback_url=request.callback_url,
+        callback_secret=request.callback_secret,
+        expiry=normalize_expiry(request.expiry)
+    )
+
+    logger.info(f"Queued edit job {job_id} with seed={request.seed}, source={image_source}")
+
+    return {
+        "accepted": True,
+        "job_id": job_id,
+        "status": "queued",
+        "message": "Edit job queued",
+        "status_url": f"/edit/status/{job_id}",
+        "result_url": f"/edit/result/{job_id}"
+    }
+
+async def run_edit_job(
+    job_id: str,
+    prompt: str,
+    image: Image.Image,
+    seed: int,
+    guidance_scale: float,
+    num_inference_steps: int,
+    callback_url: Optional[str],
+    callback_secret: Optional[str],
+    expiry: Optional[datetime]
+):
+    """Background task to run image editing."""
+    try:
+        # Update status
+        edit_jobs[job_id]["status"] = "processing"
+        edit_jobs[job_id]["started_at"] = datetime.now(timezone.utc).isoformat()
+
+        # Get Kontext manager
+        manager = get_kontext_manager()
+        if manager is None:
+            raise RuntimeError("Kontext manager not available")
+
+        # Run deterministic edit
+        logger.info(f"Processing edit job {job_id} with seed={seed}")
+        result_image = manager.generate(
+            prompt=prompt,
+            image=image,
+            seed=seed,
+            guidance_scale=guidance_scale,
+            num_inference_steps=num_inference_steps
+        )
+
+        # Save result
+        output_dir = Path(app.state.OUTPUT_DIR) / "edits"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"{job_id}.png"
+        result_image.save(output_path)
+
+        completed_at = datetime.now(timezone.utc).isoformat()
+
+        # Update job record
+        edit_jobs[job_id].update({
+            "status": "completed",
+            "completed_at": completed_at,
+            "output_path": str(output_path),
+            "result_url": f"/edit/result/{job_id}",
+            "image_url": f"{app.state.SERVICE_URL}/images/edits/{job_id}.png"
+        })
+
+        logger.info(f"Edit job {job_id} completed successfully")
+
+        # Dispatch callback if provided
+        if callback_url:
+            logger.info(f"Dispatching callback for edit job {job_id} to {callback_url}")
+            task = QueuedInferenceTask(
+                job_id=job_id,
+                inference_request=None,  # Not needed for callback
+                callback_url=callback_url,
+                callback_secret=callback_secret,
+                expiry=expiry
+            )
+            callback_info = await dispatch_callback(task, CallbackStatus.COMPLETED, image_path=output_path)
+            edit_jobs[job_id]["callback"] = callback_info
+            logger.info(f"Callback dispatched for edit job {job_id}: {callback_info}")
+
+    except Exception as e:
+        logger.error(f"Edit job {job_id} failed: {e}", exc_info=True)
+        edit_jobs[job_id].update({
+            "status": "failed",
+            "error": str(e),
+            "failed_at": datetime.now(timezone.utc).isoformat()
+        })
+
+        # Dispatch failure callback if provided
+        if callback_url:
+            logger.info(f"Dispatching failure callback for edit job {job_id} to {callback_url}")
+            task = QueuedInferenceTask(
+                job_id=job_id,
+                inference_request=None,  # Not needed for callback
+                callback_url=callback_url,
+                callback_secret=callback_secret,
+                expiry=expiry
+            )
+            callback_info = await dispatch_callback(task, CallbackStatus.FAILED, error=str(e))
+            edit_jobs[job_id]["callback"] = callback_info
+            logger.info(f"Failure callback dispatched for edit job {job_id}: {callback_info}")
+
+@app.get("/edit/status/{job_id}")
+async def get_edit_status(job_id: str):
+    """Get status of edit job."""
+    if job_id not in edit_jobs:
+        raise HTTPException(status_code=404, detail=f"Edit job {job_id} not found")
+
+    return edit_jobs[job_id]
+
+
+@app.get("/edit/result/{job_id}")
+async def get_edit_result(job_id: str):
+    """Download edited image."""
+    if job_id not in edit_jobs:
+        raise HTTPException(status_code=404, detail=f"Edit job {job_id} not found")
+
+    job = edit_jobs[job_id]
+
+    if job["status"] != "completed":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Job is {job['status']}, not completed"
+        )
+
+    output_path = Path(job["output_path"])
+
+    if not output_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="Output file not found"
+        )
+
+    return FileResponse(
+        path=str(output_path),
+        media_type="image/png",
+        filename=f"{job_id}.png"
+    )
+
 @app.get("/training/status/{job_id}")
 async def get_training_status(job_id: str):
     if job_id not in training_jobs:
@@ -687,7 +1051,7 @@ async def list_jobs(job_type: Optional[str] = None):
 async def health_check():
     config = app.state.config
     trt_status = "disabled"
-    
+
     if config.enable_inference:
         if trt_server is not None:
             trt_status = "loaded"
@@ -695,13 +1059,21 @@ async def health_check():
             trt_status = "preloading"  # May still be loading in background
         else:
             trt_status = "lazy_load_enabled"
-    
+
+    kontext_status = "disabled"
+    if config.enable_kontext_edit:
+        if kontext_manager is not None:
+            kontext_status = "loaded"
+        else:
+            kontext_status = "lazy_load_enabled"
+
     status = {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "services": {
             "training": "enabled" if config.enable_training else "disabled",
-            "inference": trt_status
+            "inference": trt_status,
+            "kontext_edit": kontext_status
         },
         "config": {
             "preload_engines": config.preload_engines,
@@ -711,6 +1083,9 @@ async def health_check():
 
     if trt_server is not None:
         status["services"]["trt_engine"] = "loaded"
+
+    if kontext_manager is not None:
+        status["services"]["kontext_manager"] = "loaded"
 
     return status
 
@@ -729,6 +1104,11 @@ async def root():
                 "POST /inference": "Generate image with TRT",
                 "GET /inference/status/{job_id}": "Get inference job status",
                 "GET /inference/result/{job_id}": "Download generated image"
+            },
+            "editing": {
+                "POST /edit": "Edit image with Kontext",
+                "GET /edit/status/{job_id}": "Get edit job status",
+                "GET /edit/result/{job_id}": "Download edited image"
             },
             "general": {
                 "GET /jobs": "List all jobs",

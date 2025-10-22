@@ -33,6 +33,7 @@ help:
 	@echo "  🚀 Deployment Modes:"
 	@echo "    make setup-inference - Configure and deploy INFERENCE server only"
 	@echo "    make setup-training  - Configure and deploy TRAINING server only"
+	@echo "    make setup-kontext   - Deploy with FLUX.1-Kontext-dev editing enabled"
 	@echo ""
 	@echo "  Individual Steps:"
 	@echo "    make build       - Build Docker images (uses cache)"
@@ -49,6 +50,10 @@ help:
 	@echo "    make reverse-proxy-run   - Start the reverse proxy"
 	@echo "    make reverse-proxy-dev   - Start the proxy (alias of run)"
 	@echo "    make reverse-proxy-config - Copy example config if missing"
+	@echo ""
+	@echo "  Testing:"
+	@echo "    make test-kontext-determinism - Run Kontext determinism E2E tests"
+	@echo "    make test-kontext-unit        - Run Kontext unit tests"
 	@echo ""
 	@echo "  Maintenance:"
 	@echo "    make clean-cache - Remove all cached TRT engines"
@@ -161,7 +166,7 @@ setup-inference:
 	@echo "   API: http://localhost:8091"
 	@echo "   Logs: make logs"
 
-# Setup for TRAINING mode only  
+# Setup for TRAINING mode only
 setup-training:
 	@echo "📦 Setting up TRAINING deployment..."
 	@echo ""
@@ -184,3 +189,24 @@ setup-training:
 	@echo "✅ Training service deployed!"
 	@echo "   API: http://localhost:8091"
 	@echo "   Logs: make logs"
+
+.PHONY: setup-kontext
+setup-kontext:  ## Deploy with FLUX.1-Kontext-dev editing enabled
+	@echo "Setting up Kontext editing..."
+	@grep -q "ENABLE_KONTEXT_EDIT=true" .env || echo "ENABLE_KONTEXT_EDIT=true" >> .env
+	@grep -q "PYTHONHASHSEED=0" .env || echo "PYTHONHASHSEED=0" >> .env
+	@grep -q "CUBLAS_WORKSPACE_CONFIG=:4096:8" .env || echo 'CUBLAS_WORKSPACE_CONFIG=:4096:8' >> .env
+	@mkdir -p output/edits
+	$(MAKE) build
+	$(MAKE) up
+	@echo "Kontext editing enabled! Visit http://localhost:8091 for API docs"
+
+.PHONY: test-kontext-determinism
+test-kontext-determinism:  ## Run Kontext determinism E2E tests
+	@echo "Running Kontext determinism tests..."
+	docker compose exec miner pytest tests/e2e/kontext_determinism/ -v -s
+
+.PHONY: test-kontext-unit
+test-kontext-unit:  ## Run Kontext unit tests
+	@echo "Running Kontext unit tests..."
+	docker compose exec miner pytest tests/unit/test_kontext_pipeline.py -v

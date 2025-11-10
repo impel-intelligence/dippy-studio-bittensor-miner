@@ -1,0 +1,22 @@
+# FLUX Kontext Optimization Requirements
+# For FP8/FP4 quantization with TensorRT
+
+# NVIDIA Model Optimizer (includes quantization tools)
+# Requires CUDA 11.8+ or 12.x
+nvidia-modelopt[torch]>=0.11.0
+
+# TensorRT (inference runtime)
+# Version must match CUDA version
+tensorrt>=8.6.0
+
+# ONNX conversion and runtime
+onnx>=1.15.0
+onnxruntime-gpu>=1.16.0
+
+# Polygraphy (NVIDIA tool for TensorRT debugging)
+polygraphy>=0.49.0
+
+# Additional dependencies
+colored-traceback>=0.3.0  # Better error messages
+tqdm>=4.66.0              # Progress bars for calibration
+psutil>=5.9.0             # Memory monitoring

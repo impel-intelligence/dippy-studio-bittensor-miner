@@ -47,12 +47,16 @@ PY
 # EXACT TRT
 RUN python3.10 -m pip install --no-cache-dir tensorrt==10.5.0 polygraphy>=0.50
 
-# Filter out ONLY torch, torchvision, TensorRT family, and flash-attn
+# Install nvidia-modelopt for quantization
+RUN python3.10 -m pip install --no-cache-dir nvidia-modelopt[torch]
+
+# Filter out ONLY torch, torchvision, TensorRT family, nvidia-modelopt, and flash-attn
 COPY requirements.txt .
 RUN awk 'BEGIN{IGNORECASE=1} \
   !/^(torch($|[[:space:]=<>]))/ && \
   !/^(torchvision($|[[:space:]=<>]))/ && \
   !/^(tensorrt($|[[:space:]=<>])|tensorrt-cu12-(bindings|libs)($|[[:space:]=<>]))/ && \
+  !/^(nvidia-modelopt($|[[:space:]=<>]))/ && \
   !/^(flash[-_]attn($|[[:space:]=<>]))/ \
   {print}' requirements.txt > /tmp/req.filtered
 
@@ -72,10 +76,12 @@ COPY lora_generate_image.py .
 COPY kontext_pipeline.py .
 COPY miner_server.py .
 COPY scripts/ ./scripts/
+COPY optimization/ ./optimization/
 
 RUN chmod +x scripts/*.sh
-RUN mkdir -p /trt-cache /app/output /app/datasets /app/config /app/models
+RUN mkdir -p /trt-cache /app/output /app/datasets /app/config /app/models /workspace/optimization/logs
 
 EXPOSE 8091
 
-CMD ["python3", "miner_server.py"]
+# Use new entrypoint that builds TRT engine if needed
+CMD ["/workspace/scripts/docker_entrypoint_with_trt.sh"]

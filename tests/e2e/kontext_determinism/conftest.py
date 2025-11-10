@@ -16,6 +16,9 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from async_inference.callback_server import CallbackServer
 
+# Import production configuration
+from test_config import PRODUCTION_CONFIG, TEST_TIMEOUTS, PERFORMANCE_TARGETS
+
 # Miner URL from environment
 import os
 MINER_URL = os.getenv("ASYNC_MINER_URL", "http://localhost:8091")
@@ -134,3 +137,79 @@ def callback_server(callback_base_url: str) -> Iterator[Optional[CallbackServer]
         yield server
     finally:
         server.stop()
+
+
+# Production parameter fixtures
+@pytest.fixture
+def production_params():
+    """Production-invariant parameters for Kontext."""
+    return PRODUCTION_CONFIG.copy()
+
+
+@pytest.fixture
+def production_image_size(production_params):
+    """Production image size (1024x1024)."""
+    return production_params["image_size"]
+
+
+@pytest.fixture
+def production_guidance_scale(production_params):
+    """Production guidance scale (4)."""
+    return production_params["guidance_scale"]
+
+
+@pytest.fixture
+def production_num_steps(production_params):
+    """Production inference steps (20)."""
+    return production_params["num_inference_steps"]
+
+
+@pytest.fixture
+def performance_targets():
+    """Expected performance targets for TRT optimization."""
+    return PERFORMANCE_TARGETS.copy()
+
+
+@pytest.fixture
+def test_timeouts():
+    """Test timeout configuration."""
+    return TEST_TIMEOUTS.copy()
+
+
+@pytest.fixture
+def large_test_image():
+    """
+    Create a large (1024x1024) test image for production testing.
+
+    Uses character_1.png if available, otherwise generates a test pattern.
+    """
+    # Try to load character_1.png (from project root)
+    char1_path = Path(__file__).parent.parent.parent.parent / "character_1.png"
+    if char1_path.exists():
+        img = Image.open(char1_path)
+        # Resize to 1024x1024 if needed
+        if img.size != (1024, 1024):
+            img = img.resize((1024, 1024), Image.Resampling.LANCZOS)
+        return img
+
+    # Fallback: generate test pattern
+    img = Image.new("RGB", (1024, 1024))
+    pixels = img.load()
+
+    # Create gradient pattern
+    for y in range(1024):
+        for x in range(1024):
+            r = int((x / 1024) * 255)
+            g = int((y / 1024) * 255)
+            b = int(((x + y) / 2048) * 255)
+            pixels[x, y] = (r, g, b)
+
+    return img
+
+
+@pytest.fixture
+def large_test_image_b64(large_test_image):
+    """Base64-encoded large test image."""
+    buffer = BytesIO()
+    large_test_image.save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode()

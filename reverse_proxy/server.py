@@ -23,7 +23,6 @@ epistula_verifier: Optional[EpistulaVerifier] = None
 
 _CAPACITY_STATE: Dict[str, Any] = {
     "inference": ["base-h100_pcie","img-h100_pcie"],
-    "training": ["H100pcie"],
 }
 
 AUTH_SCHEME = "Epistula"
@@ -275,7 +274,6 @@ async def capacity(authenticated: bool = Depends(verify_epistula_auth)):
     """Return supported capacity information."""
     return {
         "inference": _CAPACITY_STATE["inference"],
-        "training": _CAPACITY_STATE["training"],
     }
 
 
@@ -284,22 +282,19 @@ async def update_capacity(
     updates: Optional[Dict[str, Any]] = Body(default=None),
     _authorized: bool = Depends(internal_guard),
 ):
-    """Update capacity values for inference and training workloads."""
+    """Update capacity values for inference workloads."""
     if updates:
         if "inference" in updates:
             _CAPACITY_STATE["inference"] = updates["inference"]
-        if "training" in updates:
-            _CAPACITY_STATE["training"] = updates["training"]
 
     return {
         "inference": _CAPACITY_STATE["inference"],
-        "training": _CAPACITY_STATE["training"],
     }
 
 
 @app.post("/trigger_telemetry")
 async def trigger_telemetry(authenticated: bool = Depends(verify_epistula_auth)):
-    """Forward a basic telemetry payload to the training service."""
+    """Forward a basic telemetry payload to the telemetry service."""
     config = get_config()
     telemetry_url = "https://sn11.dippy-bittensor-subnet.com/optional_telemetry"
     payload = {
@@ -326,10 +321,14 @@ async def _proxy_request(request: Request, destination_base_url: str) -> Respons
     async with httpx.AsyncClient() as client:
         try:
             body = await _get_request_body(request)
-            response = await client.post(
-                f"{destination_base_url}{request.url.path}",
+            url = f"{destination_base_url}{request.url.path}"
+            
+            # Forward the request using the same HTTP method
+            response = await client.request(
+                method=request.method,
+                url=url,
                 headers=request.headers,
-                content=body,
+                content=body if request.method in ["POST", "PUT", "PATCH"] else None,
                 timeout=300.0,
             )
             return Response(
@@ -342,22 +341,43 @@ async def _proxy_request(request: Request, destination_base_url: str) -> Respons
             raise HTTPException(status_code=502, detail="Error connecting to backend service")
 
 
-@app.post("/train")
-async def proxy_training_request(
-    request: Request,
-    authenticated: bool = Depends(verify_epistula_auth),
-):
-    """Proxy training requests to the training server."""
-    training_server_url = get_config().services.training_server_url
-    return await _proxy_request(request, training_server_url)
-
-
 @app.post("/inference")
 async def proxy_inference_request(
     request: Request,
     authenticated: bool = Depends(verify_epistula_auth),
 ):
     """Proxy inference requests to the inference server."""
+    inference_server_url = get_config().services.inference_server_url
+    return await _proxy_request(request, inference_server_url)
+
+
+@app.post("/edit")
+async def proxy_edit_request(
+    request: Request,
+    authenticated: bool = Depends(verify_epistula_auth),
+):
+    """Proxy image editing requests to the inference server (async with callback)."""
+    inference_server_url = get_config().services.inference_server_url
+    # If the kontext server is separate from the flux dev server, feel free to manually edit the code here for routing
+    return await _proxy_request(request, inference_server_url)
+
+
+@app.post("/sync/inference")
+async def proxy_sync_inference_request(
+    request: Request,
+    authenticated: bool = Depends(verify_epistula_auth),
+):
+    """Proxy synchronous inference requests to the inference server (returns image directly)."""
+    inference_server_url = get_config().services.inference_server_url
+    return await _proxy_request(request, inference_server_url)
+
+
+@app.post("/sync/edit")
+async def proxy_sync_edit_request(
+    request: Request,
+    authenticated: bool = Depends(verify_epistula_auth),
+):
+    """Proxy synchronous image editing requests to the inference server (returns image directly)."""
     inference_server_url = get_config().services.inference_server_url
     return await _proxy_request(request, inference_server_url)
 

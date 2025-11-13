@@ -6,8 +6,9 @@ A FastAPI-based reverse proxy server for Bittensor subnet miners with Epistula a
 
 This reverse proxy serves as the public-facing entrypoint for the Bittensor miner, providing:
 - Epistula protocol authentication 
-- Request routing to internal training and inference servers
+- Request routing to internal inference server
 - Security layer between external validators and internal services
+- Support for both async (callback-based) and sync (direct return) inference workflows
 
 ## Setup
 
@@ -38,7 +39,7 @@ This reverse proxy serves as the public-facing entrypoint for the Bittensor mine
      "chain_endpoint": "wss://entrypoint-finney.opentensor.ai:443"
    }
    ```
-   Update `services.training_server_url` and `services.inference_server_url` if your backends are not on `http://localhost:8091`.
+   Update `services.inference_server_url` if your backend is not on `http://localhost:8091`.
 3. Install the reverse proxy dependencies:
    ```bash
    make reverse-proxy-setup
@@ -53,7 +54,7 @@ This reverse proxy serves as the public-facing entrypoint for the Bittensor mine
 ### Public Endpoints
 
 - `/check/{identifier}` – Returns HTTP 200 with `{ "status": "ok" }` when the path parameter matches the configured miner hotkey. This is an unauthenticated sanity check validators can use to confirm the proxy is advertising the expected identity.
-- `/capacity` – Requires a valid Epistula-signed request and responds with the proxy's advertised capabilities (`{"inference": [...], "training": [...]}`). Validators use this to understand which workloads your miner can currently serve.
+- `/capacity` – Requires a valid Epistula-signed request and responds with the proxy's advertised capabilities (`{"inference": [...]}`). Validators use this to understand which inference workloads your miner can currently serve.
 
 ### Miner Registry System
 
@@ -214,14 +215,35 @@ python reverse_proxy/server.py
 
 ### API Endpoints
 
+#### Async Endpoints (Callback-based)
+- `POST /inference` - Submit async inference job (requires authentication)
+- `GET /inference/status/{job_id}` - Poll job status
+- `POST /edit` - Submit async image editing job (requires authentication)
+- `GET /edit/status/{job_id}` - Poll edit job status
+
+#### Sync Endpoints (Direct return)
+- `POST /sync/inference` - Submit sync inference job, returns image directly (requires authentication)
+- `POST /sync/edit` - Submit sync edit job, returns image directly (requires authentication)
+
+#### System Endpoints
 - `GET /` - Health check endpoint
 - `GET /status` - Service status with component readiness
-- `POST /train` - Proxy training requests (requires authentication)
-- `POST /inference` - Proxy inference requests (requires authentication)
+- `GET /capacity` - Miner capacity information
 
 ### Authentication
 
-All `/train` and `/inference` endpoints require Epistula authentication. Include the appropriate authorization headers as per the Epistula protocol specification.
+All inference and edit endpoints require Epistula authentication. Include the appropriate authorization headers as per the Epistula protocol specification.
+
+### Image Delivery
+
+**Async endpoints** (`/inference`, `/edit`):
+- Miner acknowledges job immediately with `job_id` and `status_url`
+- Miner **always uploads** the completed image to your `callback_url` via POST
+- No result/download endpoints - images are only delivered via callback
+
+**Sync endpoints** (`/sync/inference`, `/sync/edit`):
+- Image is returned directly in the HTTP response as binary data
+- No callbacks or polling needed
 
 ## Development
 

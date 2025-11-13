@@ -73,13 +73,13 @@ class InferenceRequestModel(BaseModel):
 class EditRequest(BaseModel):
     """Request model for image editing with FLUX.1-Kontext-dev"""
     prompt: str = Field(..., description="Text instruction for editing the image")
+    image_url: Optional[str] = Field(
+        default=None,
+        description="HTTP(S) URL to fetch input image from"
+    )
     image_b64: Optional[str] = Field(
         default=None,
         description="Base64 encoded input image (PNG/JPEG)"
-    )
-    reference_job_id: Optional[str] = Field(
-        default=None,
-        description="Job ID of previous inference/edit to use as input"
     )
     seed: int = Field(..., description="Random seed (required for determinism)")
     guidance_scale: float = Field(
@@ -267,52 +267,56 @@ def decode_base64_image(b64_data: str) -> Image.Image:
         )
 
 
-def load_edit_input_image(
-    reference_job_id: Optional[str],
+async def load_edit_input_image(
+    image_url: Optional[str],
     image_b64: Optional[str],
     output_dir: str
 ) -> tuple[Image.Image, str]:
     """
-    Load input image from reference job or base64 data.
+    Load input image from URL or base64.
 
-    Priority: reference_job_id > image_b64
-    Falls back to image_b64 if reference not found.
+    Priority: image_url > image_b64
+    Falls back to image_b64 if URL fetch fails.
 
     Args:
-        reference_job_id: Optional job ID to load image from
+        image_url: Optional HTTP(S) URL to fetch image from
         image_b64: Optional base64 encoded fallback image
-        output_dir: Output directory containing job images
+        output_dir: Output directory containing job images (unused, kept for compatibility)
 
     Returns:
-        Tuple of (image, source) where source is "reference" or "base64"
+        Tuple of (image, source) where source describes the image origin
 
     Raises:
         HTTPException: If no valid image source available
     """
-    # Try reference job first
-    if reference_job_id:
-        # Check both inference and edit output directories
-        inference_path = Path(output_dir) / f"{reference_job_id}.png"
-        edit_path = Path(output_dir) / "edits" / f"{reference_job_id}.png"
-
-        if inference_path.exists():
-            logger.info(f"Loading reference image from inference: {reference_job_id}")
-            return Image.open(inference_path), "reference_inference"
-        elif edit_path.exists():
-            logger.info(f"Loading reference image from edit: {reference_job_id}")
-            return Image.open(edit_path), "reference_edit"
-        elif image_b64:
-            logger.warning(
-                f"Reference job {reference_job_id} not found, falling back to image_b64"
-            )
-            return decode_base64_image(image_b64), "base64_fallback"
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Reference job {reference_job_id} image not found and no fallback image_b64 provided"
-            )
-
-    # No reference, use base64
+    # Try URL first (preferred method)
+    if image_url:
+        try:
+            logger.info(f"Fetching image from URL: {image_url[:100]}...")
+            timeout = aiohttp.ClientTimeout(total=30)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(image_url) as response:
+                    if response.status != 200:
+                        raise Exception(f"HTTP {response.status}: {response.reason}")
+                    
+                    image_bytes = await response.read()
+                    logger.info(f"Downloaded {len(image_bytes)} bytes from URL")
+                    
+                    # Try to open as image
+                    image = Image.open(BytesIO(image_bytes))
+                    image.load()  # Verify it's a valid image
+                    return image, "url"
+        except Exception as e:
+            error_msg = f"Failed to fetch image from URL: {str(e)}"
+            logger.warning(error_msg)
+            
+            if image_b64:
+                logger.info("Falling back to image_b64 after URL fetch failure")
+                return decode_base64_image(image_b64), "url_fallback_to_base64"
+            else:
+                raise HTTPException(status_code=400, detail=error_msg)
+    
+    # Use base64
     if image_b64:
         logger.info("Loading image from base64 data")
         return decode_base64_image(image_b64), "base64"
@@ -320,7 +324,7 @@ def load_edit_input_image(
     # No valid source
     raise HTTPException(
         status_code=400,
-        detail="Either reference_job_id or image_b64 is required"
+        detail="Must provide either image_url or image_b64"
     )
 
 def load_trt_server():
@@ -827,7 +831,7 @@ async def create_edit_job(request: EditRequest, background_tasks: BackgroundTask
     Create image editing job with FLUX.1-Kontext-dev.
 
     Requires deterministic seed for reproducible edits.
-    Supports both direct image_b64 input and reference_job_id chaining.
+    Supports image_url (recommended) or image_b64 input.
     """
     config = app.state.config
     if not config.enable_kontext_edit:
@@ -848,10 +852,10 @@ async def create_edit_job(request: EditRequest, background_tasks: BackgroundTask
                 detail=f"Job {job_id} already exists with status {existing.get('status')}"
             )
 
-    # Load input image (validates reference_job_id or image_b64)
+    # Load input image (validates image_url or image_b64)
     try:
-        input_image, image_source = load_edit_input_image(
-            reference_job_id=request.reference_job_id,
+        input_image, image_source = await load_edit_input_image(
+            image_url=request.image_url,
             image_b64=request.image_b64,
             output_dir=app.state.OUTPUT_DIR
         )
@@ -868,7 +872,7 @@ async def create_edit_job(request: EditRequest, background_tasks: BackgroundTask
         "queued_at": now_iso,
         "request": {
             "prompt": request.prompt,
-            "reference_job_id": request.reference_job_id,
+            "image_url": request.image_url,
             "image_source": image_source,
             "seed": request.seed,
             "guidance_scale": request.guidance_scale,

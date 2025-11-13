@@ -116,7 +116,6 @@ class AuthConfig:
 class ServiceConfig:
     """Internal service configuration."""
 
-    training_server_url: str = "http://localhost:8091"
     inference_server_url: str = "http://localhost:8091"
 
     @classmethod
@@ -124,9 +123,8 @@ class ServiceConfig:
         defaults = cls()
         if not data:
             return defaults
-        training_url = str(data.get("training_server_url", defaults.training_server_url))
         inference_url = str(data.get("inference_server_url", defaults.inference_server_url))
-        return cls(training_server_url=training_url, inference_server_url=inference_url)
+        return cls(inference_server_url=inference_url)
 
 
 @dataclass(frozen=True)

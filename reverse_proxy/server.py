@@ -276,9 +276,7 @@ async def check_identifier(identifier: str):
 @app.get("/capacity")
 async def capacity(authenticated: bool = Depends(verify_epistula_auth)):
     """Return supported capacity information."""
-    return {
-        "inference": _CAPACITY_STATE,
-    }
+    return _CAPACITY_STATE
 
 @app.post("/trigger_telemetry")
 async def trigger_telemetry(authenticated: bool = Depends(verify_epistula_auth)):

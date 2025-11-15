@@ -306,7 +306,7 @@ All configuration is handled through environment variables. See the Environment 
 ### Security Considerations
 
 - The reverse proxy should be the only public-facing component
-- Internal training and inference servers should only be accessible from the reverse proxy
+- Internal inference servers should only be accessible from the reverse proxy
 - Configure CORS settings appropriately for your deployment environment
 - Ensure proper firewall rules are in place
 
@@ -330,7 +330,7 @@ The server provides structured logging with configurable levels. Monitor the fol
 
 2. **Service Connectivity**
    - Verify internal service URLs are correct
-   - Check that training/inference servers are running
+   - Check that inference servers are running
    - Validate network connectivity between services
 
 3. **Performance Issues**

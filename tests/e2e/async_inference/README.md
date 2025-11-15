@@ -12,7 +12,6 @@ Stress tests designed to reproduce race conditions causing partial/incomplete im
 
 1. **`test_rapid_concurrent_inference`** - Submits many concurrent LoRA inference requests to trigger race conditions
 2. **`test_rapid_sequential_different_loras`** - Submits sequential requests with minimal delay to trigger engine queue races
-3. **`test_training_interference`** - Tests if training jobs interrupt in-flight inference
 
 ### `image_validator.py` ⚠️ NEW
 Automated validation to detect incomplete/corrupted images:

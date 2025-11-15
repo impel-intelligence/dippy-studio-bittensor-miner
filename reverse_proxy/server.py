@@ -21,8 +21,12 @@ from reverse_proxy.epistula import EpistulaVerifier
 CONFIG: Optional[Config] = None
 epistula_verifier: Optional[EpistulaVerifier] = None
 
+"""
+Modify this dict either by code or by endpoint to designate which models you can serve
+"""
 _CAPACITY_STATE: Dict[str, Any] = {
-    "inference": ["base-h100_pcie","img-h100_pcie"],
+    "base-h100_pcie": true,
+    "img-h100_pcie": true
 }
 
 AUTH_SCHEME = "Epistula"

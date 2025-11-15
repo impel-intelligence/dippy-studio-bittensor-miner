@@ -33,7 +33,7 @@ Before running this miner, you must:
 
 The miner can run in two modes:
 - **Inference Mode**: Serves pre-trained models with TensorRT acceleration
-- **Training Mode**: Fine-tunes LoRA models on FLUX.1-dev
+- **Training Mode**: Not used
 
 ```bash
 # 1. Clone the repository
@@ -48,9 +48,6 @@ cp .env.example .env
 
 # For INFERENCE only (requires TRT engines)
 make setup-inference
-
-# For TRAINING only (requires base model)
-make setup-training
 
 # 4. Check logs
 make logs
@@ -114,7 +111,6 @@ See [docs/kontext-editing.md](docs/kontext-editing.md) for full API documentatio
 ```bash
 # Deployment Modes
 make setup-inference  # Deploy inference-only server (auto-builds TRT if needed)
-make setup-training   # Deploy training-only server
 make setup-kontext    # Deploy with FLUX.1-Kontext-dev editing enabled
 
 # Building & Management
@@ -153,19 +149,16 @@ The reverse proxy handles Bittensor authentication and routes requests to intern
    python server.py
    ```
 
-### 2. Miner Server (Separate Training & Inference Modes)
-A FastAPI server (`miner_server.py`) that can run in either training or inference mode.
+### 2. Miner Server
+A FastAPI server (`miner_server.py`) that can run inference
 
 **Features:**
-- **Training Mode**: Background LoRA fine-tuning with HuggingFace upload
 - **Inference Mode**: TensorRT-accelerated image generation with LoRA support and automatic engine preloading
 - **Static file serving**: Direct image URL access
 
 **Endpoints:**
-- `POST /train` - Submit LoRA training job
 - `POST /inference` - Generate image (with optional LoRA and callback support)
 - `POST /edit` - Edit image with FLUX.1-Kontext-dev (with callback support)
-- `GET /training/status/{job_id}` - Check training status
 - `GET /inference/status/{job_id}` - Check inference status
 - `GET /edit/status/{job_id}` - Check edit job status
 - `GET /inference/result/{job_id}` - Download generated image
@@ -225,8 +218,7 @@ Create a `.env` file in the project root:
 HF_TOKEN=your_huggingface_token_here        # HuggingFace token with write permissions
 
 # Mode Configuration (set based on deployment choice)
-ENABLE_TRAINING=true                        # Set to false for inference-only mode
-ENABLE_INFERENCE=true                       # Set to false for training-only mode
+ENABLE_INFERENCE=true                       
 MODEL_PATH=black-forest-labs/FLUX.1-dev    # Base model path
 OUTPUT_DIR=/app/output                      # Output directory in container (mapped to ./output on host)
 MINER_SERVER_PORT=8091                      # Server port
@@ -234,7 +226,6 @@ MINER_SERVER_HOST=0.0.0.0                   # Server host
 SERVICE_URL=http://localhost:8091           # Public URL for image serving
 ```
 
-**Note:** Training outputs and generated images are persisted in the `./output` directory on the host, which is mapped to `/app/output` in the container.
 
 For the reverse proxy, create `reverse_proxy/.env`:
 
@@ -243,7 +234,6 @@ For the reverse proxy, create `reverse_proxy/.env`:
 MINER_HOTKEY=your_miner_hotkey_here         # Bittensor miner hotkey
 
 # Service endpoints (internal)
-TRAINING_SERVER_URL=http://localhost:8091   # Miner server for training
 INFERENCE_SERVER_URL=http://localhost:8091  # Miner server for inference
 ```
 
@@ -251,25 +241,6 @@ INFERENCE_SERVER_URL=http://localhost:8091  # Miner server for inference
 ## How It Works
 
 The miner provides two main services:
-
-### Training Service
-1. **Receives training requests** via POST to `/train`:
-   - `job_type`: "lora_training"
-   - `params`: Including prompt, image_b64, seed
-   - `job_id`: Unique identifier
-   - `validator_endpoint`: Callback URL for results
-
-2. **Processes training jobs** in background:
-   - Generates configuration from request parameters
-   - Performs LoRA fine-tuning on FLUX.1-dev
-   - Uses provided prompts and images for training
-
-3. **Uploads trained models** to HuggingFace:
-   - Creates a new repository for each training job
-   - Uploads LoRA weights and metadata
-   - Makes models publicly accessible
-
-4. **Reports completion** back to validator endpoint
 
 ### Inference Service
 1. **Receives generation requests** via POST to `/inference`:
@@ -290,21 +261,6 @@ The miner provides two main services:
    - Direct URL access for validator retrieval
 
 ## API Examples
-
-### Submit Training Job
-```bash
-curl -X POST http://localhost:8091/train \
-  -H "Content-Type: application/json" \
-  -d '{
-    "job_type": "lora_training",
-    "job_id": "test-training-001",
-    "params": {
-      "prompt": "A cute anime girl",
-      "image_b64": "...",
-      "seed": 42
-    }
-  }'
-```
 
 ### Generate Image with Base Model
 ```bash
@@ -334,8 +290,6 @@ curl -X POST http://localhost:8091/inference \
 
 ### Check Job Status
 ```bash
-# Training status
-curl http://localhost:8091/training/status/{job_id}
 
 # Inference status
 curl http://localhost:8091/inference/status/{job_id}
@@ -355,7 +309,6 @@ NVIDIA-SMI 570.172.08             Driver Version: 570.172.08     CUDA Version: 1
 ## Monitoring and Logs
 
 - **API logs**: Check `docker compose logs -f`
-- **Training progress**: Monitor individual job outputs in logs
 - **GPU usage**: Use `nvidia-smi` to monitor GPU utilization
 
 ## Troubleshooting
@@ -378,13 +331,6 @@ If you encounter permission errors downloading FLUX.1-dev:
 2. Verify your HF_TOKEN is correctly set
 3. Check that your token has read permissions
 
-### GPU Memory Issues
-If training fails with CUDA out of memory:
-1. Use separate deployment modes (inference OR training, not both)
-2. Reduce batch size in configuration
-3. Enable gradient checkpointing
-4. Use a GPU with more VRAM
-
 ### Docker Issues
 If container fails to start:
 1. Check nvidia-docker is installed: `docker run --rm --gpus all nvidia/cuda:11.8.0-base-ubuntu22.04 nvidia-smi`
@@ -402,7 +348,6 @@ If the miner can't connect to validators:
 
 - [Bittensor Documentation](https://docs.bittensor.com)
 - [FLUX.1 Model Card](https://huggingface.co/black-forest-labs/FLUX.1-dev)
-- [LoRA Training Guide](https://huggingface.co/docs/peft/conceptual_guides/lora)
 
 ## Support
 

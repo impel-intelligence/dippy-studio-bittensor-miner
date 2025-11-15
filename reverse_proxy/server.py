@@ -22,7 +22,7 @@ CONFIG: Optional[Config] = None
 epistula_verifier: Optional[EpistulaVerifier] = None
 
 """
-Modify this dict either by code or by endpoint to designate which models you can serve
+Modify this dict by code to designate which models you can serve
 """
 _CAPACITY_STATE: Dict[str, Any] = {
     "base-h100_pcie": True,
@@ -277,24 +277,8 @@ async def check_identifier(identifier: str):
 async def capacity(authenticated: bool = Depends(verify_epistula_auth)):
     """Return supported capacity information."""
     return {
-        "inference": _CAPACITY_STATE["inference"],
+        "inference": _CAPACITY_STATE,
     }
-
-
-@app.post("/capacity")
-async def update_capacity(
-    updates: Optional[Dict[str, Any]] = Body(default=None),
-    _authorized: bool = Depends(internal_guard),
-):
-    """Update capacity values for inference workloads."""
-    if updates:
-        if "inference" in updates:
-            _CAPACITY_STATE["inference"] = updates["inference"]
-
-    return {
-        "inference": _CAPACITY_STATE["inference"],
-    }
-
 
 @app.post("/trigger_telemetry")
 async def trigger_telemetry(authenticated: bool = Depends(verify_epistula_auth)):

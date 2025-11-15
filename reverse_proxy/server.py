@@ -25,8 +25,8 @@ epistula_verifier: Optional[EpistulaVerifier] = None
 Modify this dict either by code or by endpoint to designate which models you can serve
 """
 _CAPACITY_STATE: Dict[str, Any] = {
-    "base-h100_pcie": true,
-    "img-h100_pcie": true
+    "base-h100_pcie": True,
+    "img-h100_pcie": True
 }
 
 AUTH_SCHEME = "Epistula"

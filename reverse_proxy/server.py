@@ -108,6 +108,9 @@ class EpistulaRequestContext:
 
 
 async def _get_request_body(request: Request) -> bytes:
+    # Return directly an empty dict for GET request body
+    if request.method in ['GET', 'get']:
+        return b'{}'
     """Cache and return the request body for reuse within the same request."""
     cached_body = getattr(request.state, _BODY_CACHE_ATTR, None)
     if cached_body is not None:

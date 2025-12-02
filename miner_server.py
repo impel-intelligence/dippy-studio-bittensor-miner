@@ -852,18 +852,6 @@ async def create_edit_job(request: EditRequest, background_tasks: BackgroundTask
                 detail=f"Job {job_id} already exists with status {existing.get('status')}"
             )
 
-    # Load input image (validates image_url or image_b64)
-    try:
-        input_image, image_source = await load_edit_input_image(
-            image_url=request.image_url,
-            image_b64=request.image_b64,
-            output_dir=app.state.OUTPUT_DIR
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to load input image: {str(e)}")
-
     # Create job record
     now_iso = datetime.now(timezone.utc).isoformat()
     edit_jobs[job_id] = {
@@ -873,7 +861,7 @@ async def create_edit_job(request: EditRequest, background_tasks: BackgroundTask
         "request": {
             "prompt": request.prompt,
             "image_url": request.image_url,
-            "image_source": image_source,
+            "image_source": None,
             "seed": request.seed,
             "guidance_scale": request.guidance_scale,
             "num_inference_steps": request.num_inference_steps,
@@ -888,7 +876,8 @@ async def create_edit_job(request: EditRequest, background_tasks: BackgroundTask
         run_edit_job,
         job_id=job_id,
         prompt=request.prompt,
-        image=input_image,
+        image_url=request.image_url,
+        image_b64=request.image_b64,
         seed=request.seed,
         guidance_scale=request.guidance_scale,
         num_inference_steps=request.num_inference_steps,
@@ -897,7 +886,7 @@ async def create_edit_job(request: EditRequest, background_tasks: BackgroundTask
         expiry=normalize_expiry(request.expiry)
     )
 
-    logger.info(f"Queued edit job {job_id} with seed={request.seed}, source={image_source}")
+    logger.info(f"Queued edit job {job_id} with seed={request.seed}, source=pending_fetch")
 
     return {
         "accepted": True,
@@ -911,7 +900,8 @@ async def create_edit_job(request: EditRequest, background_tasks: BackgroundTask
 async def run_edit_job(
     job_id: str,
     prompt: str,
-    image: Image.Image,
+    image_url: Optional[str],
+    image_b64: Optional[str],
     seed: int,
     guidance_scale: float,
     num_inference_steps: int,
@@ -924,6 +914,14 @@ async def run_edit_job(
         # Update status
         edit_jobs[job_id]["status"] = "processing"
         edit_jobs[job_id]["started_at"] = datetime.now(timezone.utc).isoformat()
+
+        # Fetch input image (async) now that the job is queued
+        image, image_source = await load_edit_input_image(
+            image_url=image_url,
+            image_b64=image_b64,
+            output_dir=app.state.OUTPUT_DIR
+        )
+        edit_jobs[job_id]["request"]["image_source"] = image_source
 
         # Get Kontext manager
         manager = get_kontext_manager()

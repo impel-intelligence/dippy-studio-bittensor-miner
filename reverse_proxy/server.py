@@ -303,25 +303,60 @@ async def trigger_telemetry(authenticated: bool = Depends(verify_epistula_auth))
     }
 
 
+_ASYNC_ENDPOINTS: frozenset[str] = frozenset({"/edit", "/inference"})
+
+
 async def _proxy_request(request: Request, destination_base_url: str) -> Response:
+    """Forward the incoming request to the backend.
+
+    For async endpoints like /edit we only wait briefly; if the upstream keeps the
+    connection open (processing in-line instead of enqueueing) we return 202 to
+    avoid upstream timeouts while allowing the backend to finish and callback.
+    """
+    job_id_hint: str | None = None
+    body: bytes | None = None
     async with httpx.AsyncClient() as client:
+        is_async_endpoint = request.method.upper() == "POST" and request.url.path in _ASYNC_ENDPOINTS
+        timeout_seconds = 10.0 if is_async_endpoint else 300.0
         try:
             body = await _get_request_body(request)
+            if body and is_async_endpoint:
+                try:
+                    parsed = json.loads(body)
+                    if isinstance(parsed, dict) and "job_id" in parsed:
+                        job_id_hint = str(parsed.get("job_id"))
+                except Exception:
+                    job_id_hint = None
             url = f"{destination_base_url}{request.url.path}"
-            
+
             # Forward the request using the same HTTP method
             response = await client.request(
                 method=request.method,
                 url=url,
                 headers=request.headers,
                 content=body if request.method in ["POST", "PUT", "PATCH"] else None,
-                timeout=300.0,
+                timeout=timeout_seconds,
             )
             return Response(
                 content=response.content,
                 status_code=response.status_code,
                 headers=dict(response.headers),
             )
+        except httpx.ReadTimeout:
+            if is_async_endpoint:
+                logger.warning(
+                    f"Async upstream timeout for {request.url.path}; returning 202 assuming queued"
+                )
+                return JSONResponse(
+                    status_code=202,
+                    content={
+                        "status": "queued",
+                        "job_id": job_id_hint,
+                        "detail": "Upstream processing asynchronously; proxy returned before completion",
+                        "proxy_timeout_seconds": timeout_seconds,
+                    },
+                )
+            raise HTTPException(status_code=504, detail="Upstream timed out")
         except httpx.RequestError as exc:
             logger.error(f"Error forwarding request to backend: {exc}")
             raise HTTPException(status_code=502, detail="Error connecting to backend service")

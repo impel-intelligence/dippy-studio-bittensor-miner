@@ -1,14 +1,8 @@
-# Base requirements for FLUX.1-dev
-# For FLUX.1-Kontext-dev, use requirements.kontext.txt
-#
-# Note: requirements.fluxdev.txt and requirements.kontext.txt are used during Docker build
-# This file is kept for compatibility and defaults to FLUX.1-dev settings
-
 # HF ecosystem
 safetensors
 huggingface-hub
 transformers==4.52.4
-git+https://github.com/huggingface/diffusers@363d1ab7e24c5ed6c190abb00df66d9edb74383b
+git+https://github.com/huggingface/diffusers.git
 sentencepiece
 open-clip-torch
 accelerate

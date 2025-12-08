@@ -44,9 +44,8 @@ from diffusers.pipelines.stable_diffusion import (
 from diffusers.schedulers import DDIMScheduler
 from diffusers.utils import logging
 from diffusers.utils.torch_utils import randn_tensor
-from diffusers.models.normalization import RMSNorm
 
-import modelopt.torch.quantization as mtq
+# import modelopt.torch.quantization as mtq
 
 
 TRT_LOGGER = trt.Logger(trt.Logger.ERROR)
@@ -108,23 +107,35 @@ def export_fused_transformer(
 
 
 class ONNXSafeRMSNorm(torch.nn.Module):
-    def __init__(self, module: RMSNorm):
+    """
+    ONNX-compatible RMSNorm that replaces torch.nn.RMSNorm.
+    torch.nn.RMSNorm uses aten::rms_norm which is not supported in ONNX opset 18.
+    This implementation uses primitive operations that ONNX can export.
+    """
+    def __init__(self, module: torch.nn.RMSNorm):
         super().__init__()
         self.weight = module.weight
         self.eps = module.eps
+        # Store normalized_shape for compatibility
+        self.normalized_shape = module.normalized_shape
 
     def forward(self, hidden_states):
         original_dtype = hidden_states.dtype
+        # Compute RMS normalization using primitive ops that ONNX supports
         variance = hidden_states.to(torch.float32).pow(2).mean(-1, keepdim=True)
         hidden_states_norm = hidden_states * torch.rsqrt(variance + self.eps)
         hidden_states_scaled = self.weight * hidden_states_norm
         return hidden_states_scaled.to(original_dtype)
 
 def patch_rms_norm(model):
+    """
+    Replace all torch.nn.RMSNorm modules with ONNX-compatible ONNXSafeRMSNorm.
+    """
+    patched_count = 0
     for name, module in model.named_modules():
-        if isinstance(module, RMSNorm):
+        if isinstance(module, torch.nn.RMSNorm):
             parent_path = name.rsplit('.', 1)
-            if len(parent_path) == 1: # The module is at the top level
+            if len(parent_path) == 1:  # The module is at the top level
                 parent_module = model
                 child_name = parent_path[0]
             else:
@@ -133,7 +144,9 @@ def patch_rms_norm(model):
 
             new_module = ONNXSafeRMSNorm(module)
             setattr(parent_module, child_name, new_module)
-            #logger.warning(f"Patched RMSNorm at: {name}")
+            patched_count += 1
+
+    logger.warning(f"Patched {patched_count} RMSNorm modules for ONNX compatibility")
     return model
 
 
@@ -376,6 +389,7 @@ def build_engines(
                 model = model_obj.get_model()
                 with torch.inference_mode():#, torch.autocast("cuda"):
                     inputs = model_obj.get_sample_input(opt_batch_size, opt_image_height, opt_image_width)
+                    # Export to ONNX (note: use_external_data_format was removed from PyTorch API)
                     torch.onnx.export(
                         model,
                         inputs,
@@ -384,12 +398,24 @@ def build_engines(
                         export_params=True,
                         do_constant_folding=False,
                         keep_initializers_as_inputs=True,
-                        use_external_data_format=True,
                         input_names=model_obj.get_input_names(),
                         output_names=model_obj.get_output_names(),
                         dynamic_axes=model_obj.get_dynamic_axes(),
                         #training=torch.onnx.TrainingMode.EVAL,
                         #operator_export_type=torch.onnx.OperatorExportTypes.ONNX,
+                    )
+
+                    # Convert to external data format for large models (>2GB)
+                    # This was previously done via use_external_data_format=True parameter
+                    logger.warning(f"Converting ONNX model to external data format: {onnx_path}")
+                    model_proto = onnx.load(onnx_path)
+                    onnx.save_model(
+                        model_proto,
+                        onnx_path,
+                        save_as_external_data=True,
+                        all_tensors_to_one_file=True,
+                        location=os.path.basename(onnx_path) + ".data",
+                        size_threshold=1024,  # Save tensors >= 1KB externally
                     )
                     print("ONNX len keys:", len({w.name: tuple(w.dims) for w in onnx.load(onnx_path).graph.initializer}.keys()))
                 del model
@@ -622,11 +648,12 @@ class TRTTransformer(torch.nn.Module):
         self.stream = cuda.Stream()
 
         self.config = transformer_config
-        self.encoder_hid_proj = self.config.encoder_hid_proj
-#        if hasattr(original_transformer, "encoder_hid_proj"):
-#             self.encoder_hid_proj = original_transformer.encoder_hid_proj
-#        else:
-#             self.encoder_hid_proj = SimpleNamespace(num_ip_adapters=0)
+        # Handle encoder_hid_proj attribute (may not exist in all configs)
+        if hasattr(self.config, "encoder_hid_proj"):
+            self.encoder_hid_proj = self.config.encoder_hid_proj
+        else:
+            from types import SimpleNamespace
+            self.encoder_hid_proj = SimpleNamespace(num_ip_adapters=0)
 
         self.engine.load()
         self.engine.activate()
@@ -656,6 +683,11 @@ class TRTTransformer(torch.nn.Module):
     def dtype(self) -> torch.dtype:
         # The engine was built with float16
         return torch.float16
+
+    @contextlib.contextmanager
+    def cache_context(self, cache_type: str):
+        """Context manager for caching (no-op for TRT but required by pipeline)."""
+        yield
 
     def forward(
         self,

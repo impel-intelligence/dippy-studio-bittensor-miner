@@ -1,0 +1,32 @@
+[
+    {
+        "prompt": "A cute anime girl wearing a hoodie, sitting on a sofa in the living room sipping coffee",
+        "seed": 42,
+        "guidance_scale": 7.5,
+        "num_inference_steps": 28
+    },
+    {
+        "prompt": "A futuristic cityscape at night with neon lights reflecting on wet streets",
+        "seed": 123,
+        "guidance_scale": 7.5,
+        "num_inference_steps": 28
+    },
+    {
+        "prompt": "A serene mountain landscape with a crystal clear lake and pine trees",
+        "seed": 456,
+        "guidance_scale": 7.0,
+        "num_inference_steps": 28
+    },
+    {
+        "prompt": "A steampunk robot playing chess in a Victorian library",
+        "seed": 789,
+        "guidance_scale": 8.0,
+        "num_inference_steps": 28
+    },
+    {
+        "prompt": "A magical forest with glowing mushrooms and fireflies at twilight",
+        "seed": 1011,
+        "guidance_scale": 7.5,
+        "num_inference_steps": 28
+    }
+]

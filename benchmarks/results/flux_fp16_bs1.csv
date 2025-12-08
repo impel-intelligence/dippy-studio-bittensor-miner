@@ -1,0 +1,11 @@
+timestamp,label,batch_size,iteration,latency_seconds,success
+2025-11-26 08:36:19,fp16_baseline_bs1,1,0,10.022182,True
+2025-11-26 08:36:29,fp16_baseline_bs1,1,1,10.024934,True
+2025-11-26 08:36:39,fp16_baseline_bs1,1,2,10.032064,True
+2025-11-26 08:36:49,fp16_baseline_bs1,1,3,10.034801,True
+2025-11-26 08:36:59,fp16_baseline_bs1,1,4,10.050280,True
+2025-11-26 08:37:09,fp16_baseline_bs1,1,5,10.048204,True
+2025-11-26 08:37:19,fp16_baseline_bs1,1,6,10.043135,True
+2025-11-26 08:37:29,fp16_baseline_bs1,1,7,10.062052,True
+2025-11-26 08:37:39,fp16_baseline_bs1,1,8,10.058861,True
+2025-11-26 08:37:49,fp16_baseline_bs1,1,9,10.048515,True

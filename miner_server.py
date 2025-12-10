@@ -7,10 +7,7 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 from dataclasses import dataclass, field
 import logging
-from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
-import subprocess
-import requests
 import aiohttp
 import base64
 from io import BytesIO
@@ -22,7 +19,6 @@ from pydantic import BaseModel, Field
 import uvicorn
 from PIL import Image
 
-from config_generator import generate_training_config, cleanup_job_files
 from lora_generate_image import TRTInferenceServer, InferenceRequest
 from kontext_pipeline import KontextInferenceManager
 
@@ -31,22 +27,14 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Dippy Studio Bittensor Miner Server",
-    description="Combined LoRA training and TensorRT inference server",
+    description="TensorRT inference and Kontext editing server",
     version="1.0.0"
 )
 
 trt_server: Optional[TRTInferenceServer] = None
 kontext_manager: Optional[KontextInferenceManager] = None
-training_executor = ThreadPoolExecutor(max_workers=2)
 inference_jobs: Dict[str, Dict[str, Any]] = {}
-training_jobs: Dict[str, Dict[str, Any]] = {}
 edit_jobs: Dict[str, Dict[str, Any]] = {}
-
-class TrainingRequest(BaseModel):
-    job_type: str = "lora_training"
-    params: Dict[str, Any]
-    job_id: str
-    validator_endpoint: Optional[str] = None
 
 class InferenceRequestModel(BaseModel):
     prompt: str
@@ -112,7 +100,6 @@ class EditRequest(BaseModel):
     )
 
 class ServerConfig(BaseModel):
-    enable_training: bool = Field(default=True, description="Enable training endpoints")
     enable_inference: bool = Field(default=True, description="Enable TRT inference endpoints")
     enable_kontext_edit: bool = Field(default=False, description="Enable Kontext image editing endpoints")
     trt_engine_path: Optional[str] = Field(default=None, description="Path to TRT engine")
@@ -381,26 +368,6 @@ def get_kontext_manager() -> Optional[KontextInferenceManager]:
         logger.error(f"Failed to initialize Kontext manager: {e}")
         raise
 
-def unload_trt_server():
-    """Unload TRT server to free GPU memory"""
-    global trt_server
-
-    if trt_server is not None:
-        logger.info("Unloading TRT server to free GPU memory...")
-        try:
-            trt_server.stop()
-            trt_server = None
-
-            # Force GPU memory cleanup
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-                torch.cuda.synchronize()
-
-            logger.info("TRT server unloaded successfully")
-        except Exception as e:
-            logger.error(f"Error unloading TRT server: {e}")
-
 async def preload_trt_engines():
     """Preload TRT engines at startup"""
     config = app.state.config
@@ -431,7 +398,6 @@ async def preload_trt_engines():
 async def initialize_servers():
     # Store config globally
     config = ServerConfig(
-        enable_training=os.getenv("ENABLE_TRAINING", "true").lower() == "true",
         enable_inference=os.getenv("ENABLE_INFERENCE", "true").lower() == "true",
         enable_kontext_edit=os.getenv("ENABLE_KONTEXT_EDIT", "false").lower() == "true",
         trt_engine_path=os.getenv("TRT_ENGINE_PATH", "/app/trt/transformer.plan"),
@@ -556,156 +522,6 @@ async def inference_queue_worker(worker_id: int):
         finally:
             inference_jobs[job_id] = job_record
             queue.task_done()
-
-@app.post("/train", status_code=201)
-async def train(request: TrainingRequest, background_tasks: BackgroundTasks):
-    """Start LoRA training asynchronously and return immediately"""
-
-    if request.job_type != "lora_training":
-        raise HTTPException(status_code=400, detail="Only lora_training supported")
-
-    try:
-        job_id = request.job_id  # must be present
-        if not job_id:
-            raise HTTPException(status_code=400, detail="job_id is required")
-
-        # Store job info
-        training_jobs[job_id] = {
-            "id": job_id,
-            "status": "pending",
-            "type": request.job_type,
-            "created_at": datetime.now().isoformat(),
-            "params": request.params
-        }
-
-        # Start training in background
-        background_tasks.add_task(
-            run_training_job,
-            job_id,
-            request.params,
-            request.validator_endpoint
-        )
-
-        # Return immediately with 201 OK (empty response body matches training_server.py)
-        return
-
-    except Exception as e:
-        logger.error(f"Error submitting training job: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-def run_training_job(job_id: str, params: Dict[str, Any], validator_endpoint: Optional[str]):
-    """Background task to run training and post results to validator"""
-
-    try:
-        training_jobs[job_id]["status"] = "running"
-        training_jobs[job_id]["started_at"] = datetime.now().isoformat()
-
-        # Unload TRT server before training to free GPU memory
-        unload_trt_server()
-
-        # Generate config from params
-        config_path = generate_training_config(job_id, params)
-
-        # Run the actual training
-        result = subprocess.run([
-            "python3", "run.py", config_path, "--seed", str(params.get("seed", 42))
-        ], capture_output=True, text=True)
-
-        if result.returncode != 0:
-            logger.error(f"Training failed for job {job_id}: {result.stderr}")
-            training_jobs[job_id]["status"] = "failed"
-            training_jobs[job_id]["error"] = result.stderr
-            training_jobs[job_id]["failed_at"] = datetime.now().isoformat()
-            return
-
-        # Upload to HuggingFace and get model URL
-        huggingface_url = upload_to_huggingface(job_id)
-
-        # Update job status
-        training_jobs[job_id]["status"] = "completed"
-        training_jobs[job_id]["completed_at"] = datetime.now().isoformat()
-        training_jobs[job_id]["huggingface_url"] = huggingface_url
-
-        # Post results to validator
-        if validator_endpoint:
-            post_results_to_validator(job_id, huggingface_url, validator_endpoint)
-
-    except Exception as e:
-        logger.error(f"Error in background training for job {job_id}: {e}")
-        training_jobs[job_id]["status"] = "failed"
-        training_jobs[job_id]["error"] = str(e)
-        training_jobs[job_id]["failed_at"] = datetime.now().isoformat()
-    finally:
-        cleanup_job_files(job_id)
-        # logger.info(f"Keeping job files for debugging: job_{job_id}")
-
-def upload_to_huggingface(job_id: str) -> str:
-    """Upload trained model to HuggingFace and return model URL"""
-    from huggingface_hub import HfApi, upload_folder
-
-    model_dir = Path(f"output/job_{job_id}")
-    if not model_dir.exists():
-        model_dir = Path(app.state.OUTPUT_DIR) / f"job_{job_id}"
-        if not model_dir.exists():
-            raise FileNotFoundError(f"Model output not found for job {job_id} at {model_dir}")
-
-    # Create unique model name
-    model_name = f"lora_{job_id}"
-
-    # Upload to HuggingFace (uses token's associated user)
-    api = HfApi()
-    repo_id = api.create_repo(repo_id=model_name, exist_ok=True).repo_id
-    upload_folder(
-        folder_path=str(model_dir),
-        repo_id=repo_id,
-        repo_type="model"
-    )
-
-    # Return the full HuggingFace URL
-    return f"https://huggingface.co/{repo_id}"
-
-def post_results_to_validator(job_id: str, huggingface_url: str, validator_endpoint: str):
-    """Post completion results to validator"""
-    import requests
-
-    payload = {
-        "job_id": job_id,
-        "hugging_face_url": huggingface_url
-    }
-
-    try:
-        response = requests.post(
-            validator_endpoint,
-            json=payload,
-            timeout=30
-        )
-        response.raise_for_status()
-        logger.info(f"Successfully posted results for job {job_id}")
-
-    except requests.RequestException as e:
-        logger.error(f"Failed to post results to validator: {e}")
-
-async def notify_validator(endpoint: str, job_id: str, status: str, output_path: str = None, error: str = None):
-    import aiohttp
-
-    payload = {
-        "job_id": job_id,
-        "status": status,
-        "timestamp": datetime.now().isoformat()
-    }
-
-    if output_path:
-        payload["output_path"] = output_path
-    if error:
-        payload["error"] = error
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(endpoint, json=payload) as response:
-                if response.status != 200:
-                    logger.warning(f"Validator notification failed: {response.status}")
-    except Exception as e:
-        logger.error(f"Failed to notify validator: {e}")
 
 @app.post("/inference")
 async def generate_image(request: InferenceRequestModel):
@@ -1030,23 +846,16 @@ async def get_edit_result(job_id: str):
         filename=f"{job_id}.png"
     )
 
-@app.get("/training/status/{job_id}")
-async def get_training_status(job_id: str):
-    if job_id not in training_jobs:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-
-    return training_jobs[job_id]
-
 @app.get("/jobs")
 async def list_jobs(job_type: Optional[str] = None):
-    if job_type == "training":
-        return {"training_jobs": list(training_jobs.values())}
-    elif job_type == "inference":
+    if job_type == "inference":
         return {"inference_jobs": list(inference_jobs.values())}
+    elif job_type == "edit":
+        return {"edit_jobs": list(edit_jobs.values())}
     else:
         return {
-            "training_jobs": list(training_jobs.values()),
-            "inference_jobs": list(inference_jobs.values())
+            "inference_jobs": list(inference_jobs.values()),
+            "edit_jobs": list(edit_jobs.values())
         }
 
 @app.get("/health")
@@ -1073,7 +882,6 @@ async def health_check():
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "services": {
-            "training": "enabled" if config.enable_training else "disabled",
             "inference": trt_status,
             "kontext_edit": kontext_status
         },
@@ -1098,10 +906,6 @@ async def root():
         "name": "Dippy Studio Bittensor Miner Server",
         "version": "1.0.0",
         "endpoints": {
-            "training": {
-                "POST /train": "Submit training job",
-                "GET /training/status/{job_id}": "Get training job status"
-            },
             "inference": {
                 "POST /inference": "Generate image with TRT",
                 "GET /inference/status/{job_id}": "Get inference job status",
@@ -1140,7 +944,6 @@ async def shutdown_event():
 
     if trt_server:
         trt_server.stop()
-    training_executor.shutdown(wait=True)
 
 def main():
     port = int(os.getenv("MINER_SERVER_PORT", "8091"))

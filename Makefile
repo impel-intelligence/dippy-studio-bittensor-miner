@@ -1,4 +1,4 @@
-.PHONY: help setup-inference setup-training build trt-build trt-rebuild up down logs restart clean-cache clean-model clean-all reverse-proxy-config reverse-proxy-setup reverse-proxy-run reverse-proxy-dev
+.PHONY: help setup-inference build trt-build trt-rebuild up down logs restart clean-cache clean-model clean-all reverse-proxy-config reverse-proxy-setup reverse-proxy-run reverse-proxy-dev
 
 PYTHON ?= python
 PIP ?= uv pip
@@ -32,7 +32,6 @@ help:
 	@echo ""
 	@echo "  🚀 Deployment Modes:"
 	@echo "    make setup-inference - Configure and deploy INFERENCE server only (FLUX.1-dev)"
-	@echo "    make setup-training  - Configure and deploy TRAINING server only"
 	@echo "    make setup-kontext   - Deploy with FLUX.1-Kontext-dev editing enabled"
 	@echo ""
 	@echo "  Individual Steps (FLUX.1-dev):"
@@ -203,37 +202,10 @@ setup-inference:
 		echo "✓ TRT engines found"; \
 	fi
 	@echo ""
-	@echo "🚀 Starting inference service (training disabled)..."
-	ENABLE_TRAINING=false ENABLE_INFERENCE=true docker compose up -d miner
+	@echo "🚀 Starting inference service..."
+	ENABLE_INFERENCE=true docker compose up -d miner
 	@echo ""
 	@echo "✅ Inference service deployed!"
-	@echo "   API: http://localhost:8091"
-	@echo "   Logs: make logs"
-
-# Setup for TRAINING mode only
-setup-training:
-	@echo "📦 Setting up TRAINING deployment..."
-	@echo ""
-	@echo "⚠️  Configuring for training-only mode"
-	@echo ""
-	@echo "🔨 Building FLUX.1-dev Docker image..."
-	$(MAKE) build
-	@echo ""
-	@echo "🔍 Checking base model..."
-	@if [ ! -d "/models/FLUX.1-dev" ]; then \
-		echo "⚠️  Base model not found!"; \
-		echo "📥 Downloading FLUX.1-dev model (this may take a while)..."; \
-		echo ""; \
-		docker compose run --rm miner huggingface-cli download black-forest-labs/FLUX.1-dev --local-dir /models/FLUX.1-dev; \
-		echo "✓ Base model downloaded"; \
-	else \
-		echo "✓ Base model found"; \
-	fi
-	@echo ""
-	@echo "🚀 Starting training service (inference disabled)..."
-	ENABLE_INFERENCE=false ENABLE_TRAINING=true docker compose up -d miner
-	@echo ""
-	@echo "✅ Training service deployed!"
 	@echo "   API: http://localhost:8091"
 	@echo "   Logs: make logs"
 

@@ -82,7 +82,7 @@ services:
     volumes:
       - ./datasets:/app/datasets
       - ./output:/app/output
-      - ./output:/workspace/output  # Training saves here (working directory)
+      - ./output:/workspace/output  # Working directory output mapping
       - ./config:/app/config
       - ./models:/app/models
       - ./trt-cache:/trt-cache

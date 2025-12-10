@@ -3,7 +3,7 @@
 ## General Overview
 
 ### What is the Dippy Bittensor Subnet?
-The Dippy Studio Subnet (Subnet 11) is a decentralized network for distributed AI image inference and training tasks. 
+The Dippy Studio Subnet (Subnet 11) is a decentralized network for distributed AI image inference tasks. 
 Miners provide computational resources to process requests from validators.
 
 ### How does the subnet work?
@@ -15,7 +15,7 @@ Miners provide computational resources to process requests from validators.
 
 ### What types of jobs are there?
 - **Inference jobs**: Currently active - miners process inference requests using the base model provided
-- **Training jobs**: Not used at all
+- **Edit jobs**: Optional FLUX.1-Kontext editing
 
 ### How is miner selection determined?
 The orchestrator uses a routing algorithm that considers:

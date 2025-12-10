@@ -14,7 +14,7 @@ open-clip-torch
 accelerate
 hf_transfer
 
-# Training / LoRA / extras
+# LoRA / extras
 lycoris-lora==1.8.3
 peft
 torchao==0.9.0

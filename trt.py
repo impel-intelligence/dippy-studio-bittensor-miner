@@ -388,7 +388,6 @@ def build_engines(
                         input_names=model_obj.get_input_names(),
                         output_names=model_obj.get_output_names(),
                         dynamic_axes=model_obj.get_dynamic_axes(),
-                        #training=torch.onnx.TrainingMode.EVAL,
                         #operator_export_type=torch.onnx.OperatorExportTypes.ONNX,
                     )
                     print("ONNX len keys:", len({w.name: tuple(w.dims) for w in onnx.load(onnx_path).graph.initializer}.keys()))
@@ -954,4 +953,3 @@ if __name__ == "__main__":
         onnx_opset=18,
     )
     logger.warning("--- Transformer Export Finished ---")
-

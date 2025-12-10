@@ -1,12 +1,8 @@
 # Dippy Studio Bittensor Miner
 
-A specialized Bittensor subnet miner (subnet 231 on testnet) for AI model training and inference, featuring LoRA fine-tuning of FLUX.1-dev with TensorRT acceleration for high-performance inference.
+A specialized Bittensor subnet miner (subnet 231 on testnet) for high-performance FLUX.1-dev inference with TensorRT acceleration and LoRA refitting.
 
 ## Prerequisites
-
-<div style="background-color:#fff3cd;border:1px solid #ffeeba;padding:12px 16px;margin-bottom:16px;">
-  <strong>Heads up:</strong> Currently LoRA training is not active at this time.
-</div>
 
 You will need access to a H100 GPU PCIe with the following configuration:
 ```
@@ -33,7 +29,7 @@ Before running this miner, you must:
 
 The miner can run in two modes:
 - **Inference Mode**: Serves pre-trained models with TensorRT acceleration
-- **Training Mode**: Not used
+- **Kontext Editing Mode**: Enable deterministic FLUX.1-Kontext-dev editing
 
 ```bash
 # 1. Clone the repository

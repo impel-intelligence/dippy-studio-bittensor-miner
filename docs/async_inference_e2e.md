@@ -233,7 +233,7 @@ HTTP header:
 
 ## Troubleshooting Tips
 
-- If the test skips with "Miner server unavailable", ensure `run.py` (or your deployment) is running and the port matches `ASYNC_MINER_URL`.
+- If the test skips with "Miner server unavailable", ensure `miner_server.py` (or your deployment) is running and the port matches `ASYNC_MINER_URL`.
 - The callback server must be reachable from the miner container/host. When running in Docker, set `ASYNC_CALLBACK_BASE_URL` to an address the miner can reach (e.g. `http://host.docker.internal:8092`) and adjust `ASYNC_CALLBACK_BIND_HOST` accordingly.
 - Clear old callback artifacts by deleting `mock_callbacks/` before re-running tests if needed.
 - Increase the default expiry window with `--expiry-minutes` if jobs take longer than five minutes.

@@ -2,9 +2,10 @@ import os
 import asyncio
 import uuid
 import time
+import importlib
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Callable
 from dataclasses import dataclass, field
 import logging
 from enum import Enum
@@ -12,8 +13,8 @@ import aiohttp
 import base64
 from io import BytesIO
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import uvicorn
@@ -108,19 +109,36 @@ class ServerConfig(BaseModel):
     preload_engines: bool = Field(default=True, description="Preload TRT engines at startup")
 
 
+class CallbackStatus(str, Enum):
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class TaskType(str, Enum):
+    INFERENCE = "inference"
+    EDIT = "edit"
+
+
 @dataclass
-class QueuedInferenceTask:
+class EditTaskParams:
+    prompt: str
+    image_url: Optional[str]
+    image_b64: Optional[str]
+    seed: int
+    guidance_scale: float
+    num_inference_steps: int
+
+
+@dataclass
+class QueuedTask:
     job_id: str
-    inference_request: InferenceRequest
+    task_type: TaskType
+    inference_request: Optional[InferenceRequest]
+    edit_params: Optional[EditTaskParams]
     callback_url: Optional[str]
     callback_secret: Optional[str]
     expiry: Optional[datetime]
     enqueued_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-
-
-class CallbackStatus(str, Enum):
-    COMPLETED = "completed"
-    FAILED = "failed"
 
 
 def normalize_expiry(expiry: Optional[datetime]) -> Optional[datetime]:
@@ -129,6 +147,63 @@ def normalize_expiry(expiry: Optional[datetime]) -> Optional[datetime]:
     if expiry.tzinfo is None:
         return expiry.replace(tzinfo=timezone.utc)
     return expiry.astimezone(timezone.utc)
+
+
+def load_job_record_hook() -> Optional[Callable[[str, Dict[str, Any]], None]]:
+    """
+    Optional hook loader for persisting job records before cleanup.
+    Set JOB_RECORD_HOOK to module:function to enable.
+    """
+    hook_path = os.getenv("JOB_RECORD_HOOK")
+    if not hook_path:
+        return None
+
+    try:
+        module_path, func_name = hook_path.split(":")
+        module = importlib.import_module(module_path)
+        hook = getattr(module, func_name)
+        if not callable(hook):
+            raise TypeError(f"{hook_path} is not callable")
+        logger.info(f"Loaded job record hook: {hook_path}")
+        return hook
+    except Exception as exc:
+        logger.error(f"Failed to load JOB_RECORD_HOOK '{hook_path}': {exc}")
+        return None
+
+
+def persist_job_record(job_type: TaskType, job_record: Dict[str, Any]) -> None:
+    """Invoke optional user-provided hook for persisting job records."""
+    hook: Optional[Callable[[str, Dict[str, Any]], None]] = getattr(app.state, "job_record_hook", None)
+    if not hook:
+        return
+
+    try:
+        hook(job_type.value, job_record)
+    except Exception as exc:
+        logger.error(f"Job record hook failed for {job_type.value}:{job_record.get('id')}: {exc}")
+
+
+async def _cleanup_job_record(job_type: TaskType, job_id: str, job_record: Dict[str, Any]):
+    """Remove job record after retention period and invoke persistence hook."""
+    ttl_seconds = getattr(app.state, "job_record_ttl", 300)
+    if ttl_seconds > 0:
+        await asyncio.sleep(ttl_seconds)
+
+    persist_job_record(job_type, job_record)
+
+    if job_type == TaskType.INFERENCE:
+        removed = inference_jobs.pop(job_id, None)
+    else:
+        removed = edit_jobs.pop(job_id, None)
+
+    if removed:
+        logger.info(f"Cleaned up job record for {job_type.value} job {job_id}")
+
+
+def schedule_job_cleanup(job_type: TaskType, job_id: str, job_record: Dict[str, Any]):
+    """Schedule asynchronous cleanup without blocking the worker."""
+    record_copy = dict(job_record)
+    asyncio.create_task(_cleanup_job_record(job_type, job_id, record_copy))
 
 
 async def wait_for_image(output_path: Path, timeout: Optional[float], poll_interval: float = 0.5) -> Path:
@@ -146,7 +221,7 @@ async def wait_for_image(output_path: Path, timeout: Optional[float], poll_inter
 
 
 async def dispatch_callback(
-    task: QueuedInferenceTask,
+    task: QueuedTask,
     status: CallbackStatus,
     *,
     image_path: Optional[Path] = None,
@@ -224,6 +299,7 @@ async def dispatch_callback(
             "attempted_at": attempt_iso,
             "payload_status": status.value
         }
+
 
 def decode_base64_image(b64_data: str) -> Image.Image:
     """
@@ -428,26 +504,30 @@ async def initialize_servers():
     logger.info(f"Server initialized. Output directory: {config.output_dir}")
     logger.info(f"Service URL: {app.state.SERVICE_URL}")
     
-    # Configure inference queue and workers
+    # Configure queues and workers
     app.state.inference_timeout = int(os.getenv("INFERENCE_TIMEOUT", "300"))
     app.state.callback_timeout = int(os.getenv("CALLBACK_TIMEOUT", "30"))
+    app.state.job_record_ttl = max(0, int(os.getenv("JOB_RECORD_TTL_SECONDS", "300")))
+    app.state.job_record_hook = load_job_record_hook()
+
     queue_maxsize_env = int(os.getenv("INFERENCE_QUEUE_MAXSIZE", "0"))
     queue_maxsize = max(0, queue_maxsize_env)
     worker_count = max(1, int(os.getenv("INFERENCE_WORKERS", "1")))
+    queue_enabled = config.enable_inference or config.enable_kontext_edit
 
-    if config.enable_inference:
-        app.state.inference_queue = asyncio.Queue(maxsize=queue_maxsize)
-        app.state.inference_worker_tasks = [
-            asyncio.create_task(inference_queue_worker(idx))
+    if queue_enabled:
+        app.state.job_queue = asyncio.Queue(maxsize=queue_maxsize)
+        app.state.job_worker_tasks = [
+            asyncio.create_task(job_queue_worker(idx))
             for idx in range(worker_count)
         ]
         queue_desc = "unbounded" if queue_maxsize == 0 else queue_maxsize
         logger.info(
-            f"Inference queue ready (workers={worker_count}, maxsize={queue_desc}, timeout={app.state.inference_timeout}s)"
+            f"Job queue ready (workers={worker_count}, maxsize={queue_desc}, timeout={app.state.inference_timeout}s)"
         )
     else:
-        app.state.inference_queue = None
-        app.state.inference_worker_tasks = []
+        app.state.job_queue = None
+        app.state.job_worker_tasks = []
 
     # Start TRT engine preloading if enabled
     await preload_trt_engines()
@@ -455,72 +535,163 @@ async def initialize_servers():
     return config
 
 
-async def inference_queue_worker(worker_id: int):
-    queue: asyncio.Queue = app.state.inference_queue
-    logger.info(f"Inference worker {worker_id} started")
+async def handle_inference_task(task: QueuedTask, worker_id: int):
+    job_id = task.job_id
+    job_record = inference_jobs.get(job_id, {})
+    job_record.update({
+        "id": job_id,
+        "status": "processing",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "worker_id": worker_id
+    })
+
+    inference_jobs[job_id] = job_record
+
+    try:
+        server = load_trt_server()
+        if server is None:
+            raise RuntimeError("TRT inference server is not available")
+
+        if task.inference_request is None:
+            raise RuntimeError("Missing inference request payload")
+
+        server.submit(task.inference_request)
+        output_path = Path(task.inference_request.output_path)
+
+        try:
+            await wait_for_image(output_path, getattr(app.state, "inference_timeout", 300))
+        except TimeoutError as exc:
+            callback_info = await dispatch_callback(task, CallbackStatus.FAILED, error=str(exc))
+            job_record.update({
+                "status": "timeout",
+                "error": str(exc),
+                "failed_at": datetime.now(timezone.utc).isoformat(),
+                "callback": callback_info
+            })
+            return
+
+        completed_at = datetime.now(timezone.utc).isoformat()
+        job_record.update({
+            "status": "completed",
+            "completed_at": completed_at,
+            "output_path": str(output_path),
+            "result_url": f"/inference/result/{job_id}",
+            "image_url": f"{app.state.SERVICE_URL}/images/{job_id}.png"
+        })
+
+        callback_info = await dispatch_callback(task, CallbackStatus.COMPLETED, image_path=output_path)
+        job_record["callback"] = callback_info
+
+    except Exception as exc:
+        logger.error(f"Inference worker {worker_id} failed for job {job_id}: {exc}", exc_info=True)
+        callback_info = await dispatch_callback(task, CallbackStatus.FAILED, error=str(exc))
+        job_record.update({
+            "status": "failed",
+            "error": str(exc),
+            "failed_at": datetime.now(timezone.utc).isoformat(),
+            "callback": callback_info
+        })
+    finally:
+        inference_jobs[job_id] = job_record
+        schedule_job_cleanup(TaskType.INFERENCE, job_id, job_record)
+
+
+async def handle_edit_task(task: QueuedTask, worker_id: int):
+    job_id = task.job_id
+    job_record = edit_jobs.get(job_id, {})
+    job_record.update({
+        "id": job_id,
+        "status": "processing",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "worker_id": worker_id
+    })
+    edit_jobs[job_id] = job_record
+
+    try:
+        if task.edit_params is None:
+            raise RuntimeError("Missing edit parameters")
+
+        image, image_source = await load_edit_input_image(
+            image_url=task.edit_params.image_url,
+            image_b64=task.edit_params.image_b64,
+            output_dir=app.state.OUTPUT_DIR
+        )
+        job_record.setdefault("request", {})
+        job_record["request"]["image_source"] = image_source
+
+        manager = get_kontext_manager()
+        if manager is None:
+            raise RuntimeError("Kontext manager not available")
+
+        logger.info(f"Processing edit job {job_id} with seed={task.edit_params.seed}")
+        result_image = await asyncio.to_thread(
+            manager.generate,
+            prompt=task.edit_params.prompt,
+            image=image,
+            seed=task.edit_params.seed,
+            guidance_scale=task.edit_params.guidance_scale,
+            num_inference_steps=task.edit_params.num_inference_steps
+        )
+
+        output_dir = Path(app.state.OUTPUT_DIR) / "edits"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = output_dir / f"{job_id}.png"
+        result_image.save(output_path)
+
+        completed_at = datetime.now(timezone.utc).isoformat()
+        job_record.update({
+            "status": "completed",
+            "completed_at": completed_at,
+            "output_path": str(output_path),
+            "result_url": f"/edit/result/{job_id}",
+            "image_url": f"{app.state.SERVICE_URL}/images/edits/{job_id}.png"
+        })
+
+        if task.callback_url:
+            logger.info(f"Dispatching callback for edit job {job_id} to {task.callback_url}")
+            callback_info = await dispatch_callback(task, CallbackStatus.COMPLETED, image_path=output_path)
+            job_record["callback"] = callback_info
+
+    except Exception as exc:
+        logger.error(f"Edit job {job_id} failed: {exc}", exc_info=True)
+        job_record.update({
+            "status": "failed",
+            "error": str(exc),
+            "failed_at": datetime.now(timezone.utc).isoformat()
+        })
+
+        if task.callback_url:
+            logger.info(f"Dispatching failure callback for edit job {job_id} to {task.callback_url}")
+            callback_info = await dispatch_callback(task, CallbackStatus.FAILED, error=str(exc))
+            job_record["callback"] = callback_info
+            logger.info(f"Failure callback dispatched for edit job {job_id}: {callback_info}")
+    finally:
+        edit_jobs[job_id] = job_record
+        schedule_job_cleanup(TaskType.EDIT, job_id, job_record)
+
+
+async def job_queue_worker(worker_id: int):
+    queue: asyncio.Queue = app.state.job_queue
+    logger.info(f"Job worker {worker_id} started")
 
     while True:
         task = await queue.get()
 
         if task is None:
-            logger.info(f"Inference worker {worker_id} shutting down")
+            logger.info(f"Job worker {worker_id} shutting down")
             queue.task_done()
             break
 
-        job_id = task.job_id
-        job_record = inference_jobs.get(job_id, {})
-        job_record.update({
-            "id": job_id,
-            "status": "processing",
-            "started_at": datetime.now(timezone.utc).isoformat(),
-            "worker_id": worker_id
-        })
-
-        inference_jobs[job_id] = job_record
-
         try:
-            server = load_trt_server()
-            if server is None:
-                raise RuntimeError("TRT inference server is not available")
-
-            server.submit(task.inference_request)
-            output_path = Path(task.inference_request.output_path)
-
-            try:
-                await wait_for_image(output_path, getattr(app.state, "inference_timeout", 300))
-            except TimeoutError as exc:
-                callback_info = await dispatch_callback(task, CallbackStatus.FAILED, error=str(exc))
-                job_record.update({
-                    "status": "timeout",
-                    "error": str(exc),
-                    "failed_at": datetime.now(timezone.utc).isoformat(),
-                    "callback": callback_info
-                })
-                continue
-
-            completed_at = datetime.now(timezone.utc).isoformat()
-            job_record.update({
-                "status": "completed",
-                "completed_at": completed_at,
-                "output_path": str(output_path),
-                "result_url": f"/inference/result/{job_id}",
-                "image_url": f"{app.state.SERVICE_URL}/images/{job_id}.png"
-            })
-
-            callback_info = await dispatch_callback(task, CallbackStatus.COMPLETED, image_path=output_path)
-            job_record["callback"] = callback_info
-
+            if task.task_type == TaskType.INFERENCE:
+                await handle_inference_task(task, worker_id)
+            elif task.task_type == TaskType.EDIT:
+                await handle_edit_task(task, worker_id)
+            else:
+                logger.error(f"Unknown task type for job {task.job_id}: {task.task_type}")
         except Exception as exc:
-            logger.error(f"Inference worker {worker_id} failed for job {job_id}: {exc}", exc_info=True)
-            callback_info = await dispatch_callback(task, CallbackStatus.FAILED, error=str(exc))
-            job_record.update({
-                "status": "failed",
-                "error": str(exc),
-                "failed_at": datetime.now(timezone.utc).isoformat(),
-                "callback": callback_info
-            })
+            logger.error(f"Job worker {worker_id} encountered an error for job {getattr(task, 'job_id', 'unknown')}: {exc}", exc_info=True)
         finally:
-            inference_jobs[job_id] = job_record
             queue.task_done()
 
 @app.post("/inference")
@@ -529,9 +700,9 @@ async def generate_image(request: InferenceRequestModel):
     if not config.enable_inference:
         raise HTTPException(status_code=503, detail="Inference is currently disabled")
 
-    inference_queue = getattr(app.state, "inference_queue", None)
-    if inference_queue is None:
-        raise HTTPException(status_code=503, detail="Inference queue is not ready")
+    job_queue = getattr(app.state, "job_queue", None)
+    if job_queue is None:
+        raise HTTPException(status_code=503, detail="Job queue is not ready")
 
     job_id = request.job_id or str(uuid.uuid4())
 
@@ -554,9 +725,11 @@ async def generate_image(request: InferenceRequestModel):
 
     expiry = normalize_expiry(request.expiry)
 
-    task = QueuedInferenceTask(
+    task = QueuedTask(
         job_id=job_id,
+        task_type=TaskType.INFERENCE,
         inference_request=inference_req,
+        edit_params=None,
         callback_url=request.callback_url,
         callback_secret=request.callback_secret,
         expiry=expiry
@@ -583,7 +756,7 @@ async def generate_image(request: InferenceRequestModel):
     }
 
     try:
-        await inference_queue.put(task)
+        await job_queue.put(task)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -606,13 +779,22 @@ async def generate_image(request: InferenceRequestModel):
 
 @app.get("/inference/status/{job_id}")
 async def get_inference_status(job_id: str):
-    if job_id not in inference_jobs:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+    output_path = Path(app.state.OUTPUT_DIR) / f"{job_id}.png"
+    job = inference_jobs.get(job_id)
 
-    job = inference_jobs[job_id]
+    if job is None:
+        if output_path.exists():
+            return {
+                "id": job_id,
+                "status": "completed",
+                "output_path": str(output_path),
+                "result_url": f"/inference/result/{job_id}",
+                "image_url": f"{app.state.SERVICE_URL}/images/{job_id}.png",
+                "note": "job record cleaned up"
+            }
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found (it may have been cleaned up)")
 
     # Check if output exists using global OUTPUT_DIR
-    output_path = Path(app.state.OUTPUT_DIR) / f"{job_id}.png"
     if output_path.exists() and job.get("status") in {"queued", "processing"}:
         job.update({
             "status": "completed",
@@ -627,9 +809,6 @@ async def get_inference_status(job_id: str):
 
 @app.get("/inference/result/{job_id}")
 async def get_inference_result(job_id: str):
-    if job_id not in inference_jobs:
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-
     output_path = Path(app.state.OUTPUT_DIR) / f"{job_id}.png"
 
     if not output_path.exists():
@@ -642,7 +821,7 @@ async def get_inference_result(job_id: str):
     )
 
 @app.post("/edit")
-async def create_edit_job(request: EditRequest, background_tasks: BackgroundTasks):
+async def create_edit_job(request: EditRequest):
     """
     Create image editing job with FLUX.1-Kontext-dev.
 
@@ -655,6 +834,10 @@ async def create_edit_job(request: EditRequest, background_tasks: BackgroundTask
             status_code=503,
             detail="Kontext image editing is currently disabled"
         )
+
+    job_queue = getattr(app.state, "job_queue", None)
+    if job_queue is None:
+        raise HTTPException(status_code=503, detail="Job queue is not ready")
 
     # Generate job ID if not provided
     job_id = request.job_id or f"edit-{str(uuid.uuid4())}"
@@ -687,20 +870,35 @@ async def create_edit_job(request: EditRequest, background_tasks: BackgroundTask
         }
     }
 
-    # Queue background task
-    background_tasks.add_task(
-        run_edit_job,
-        job_id=job_id,
+    edit_params = EditTaskParams(
         prompt=request.prompt,
         image_url=request.image_url,
         image_b64=request.image_b64,
         seed=request.seed,
         guidance_scale=request.guidance_scale,
-        num_inference_steps=request.num_inference_steps,
+        num_inference_steps=request.num_inference_steps
+    )
+
+    task = QueuedTask(
+        job_id=job_id,
+        task_type=TaskType.EDIT,
+        inference_request=None,
+        edit_params=edit_params,
         callback_url=request.callback_url,
         callback_secret=request.callback_secret,
         expiry=normalize_expiry(request.expiry)
     )
+
+    try:
+        await job_queue.put(task)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.error(f"Failed to enqueue edit job {job_id}: {exc}")
+        edit_jobs[job_id]["status"] = "failed"
+        edit_jobs[job_id]["error"] = str(exc)
+        edit_jobs[job_id]["failed_at"] = datetime.now(timezone.utc).isoformat()
+        raise HTTPException(status_code=500, detail="Failed to queue edit job")
 
     logger.info(f"Queued edit job {job_id} with seed={request.seed}, source=pending_fetch")
 
@@ -713,126 +911,31 @@ async def create_edit_job(request: EditRequest, background_tasks: BackgroundTask
         "result_url": f"/edit/result/{job_id}"
     }
 
-async def run_edit_job(
-    job_id: str,
-    prompt: str,
-    image_url: Optional[str],
-    image_b64: Optional[str],
-    seed: int,
-    guidance_scale: float,
-    num_inference_steps: int,
-    callback_url: Optional[str],
-    callback_secret: Optional[str],
-    expiry: Optional[datetime]
-):
-    """Background task to run image editing."""
-    try:
-        # Update status
-        edit_jobs[job_id]["status"] = "processing"
-        edit_jobs[job_id]["started_at"] = datetime.now(timezone.utc).isoformat()
-
-        # Fetch input image (async) now that the job is queued
-        image, image_source = await load_edit_input_image(
-            image_url=image_url,
-            image_b64=image_b64,
-            output_dir=app.state.OUTPUT_DIR
-        )
-        edit_jobs[job_id]["request"]["image_source"] = image_source
-
-        # Get Kontext manager
-        manager = get_kontext_manager()
-        if manager is None:
-            raise RuntimeError("Kontext manager not available")
-
-        # Run deterministic edit
-        logger.info(f"Processing edit job {job_id} with seed={seed}")
-        result_image = manager.generate(
-            prompt=prompt,
-            image=image,
-            seed=seed,
-            guidance_scale=guidance_scale,
-            num_inference_steps=num_inference_steps
-        )
-
-        # Save result
-        output_dir = Path(app.state.OUTPUT_DIR) / "edits"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / f"{job_id}.png"
-        result_image.save(output_path)
-
-        completed_at = datetime.now(timezone.utc).isoformat()
-
-        # Update job record
-        edit_jobs[job_id].update({
-            "status": "completed",
-            "completed_at": completed_at,
-            "output_path": str(output_path),
-            "result_url": f"/edit/result/{job_id}",
-            "image_url": f"{app.state.SERVICE_URL}/images/edits/{job_id}.png"
-        })
-
-        logger.info(f"Edit job {job_id} completed successfully")
-
-        # Dispatch callback if provided
-        if callback_url:
-            logger.info(f"Dispatching callback for edit job {job_id} to {callback_url}")
-            task = QueuedInferenceTask(
-                job_id=job_id,
-                inference_request=None,  # Not needed for callback
-                callback_url=callback_url,
-                callback_secret=callback_secret,
-                expiry=expiry
-            )
-            callback_info = await dispatch_callback(task, CallbackStatus.COMPLETED, image_path=output_path)
-            edit_jobs[job_id]["callback"] = callback_info
-            logger.info(f"Callback dispatched for edit job {job_id}: {callback_info}")
-
-    except Exception as e:
-        logger.error(f"Edit job {job_id} failed: {e}", exc_info=True)
-        edit_jobs[job_id].update({
-            "status": "failed",
-            "error": str(e),
-            "failed_at": datetime.now(timezone.utc).isoformat()
-        })
-
-        # Dispatch failure callback if provided
-        if callback_url:
-            logger.info(f"Dispatching failure callback for edit job {job_id} to {callback_url}")
-            task = QueuedInferenceTask(
-                job_id=job_id,
-                inference_request=None,  # Not needed for callback
-                callback_url=callback_url,
-                callback_secret=callback_secret,
-                expiry=expiry
-            )
-            callback_info = await dispatch_callback(task, CallbackStatus.FAILED, error=str(e))
-            edit_jobs[job_id]["callback"] = callback_info
-            logger.info(f"Failure callback dispatched for edit job {job_id}: {callback_info}")
-
 @app.get("/edit/status/{job_id}")
 async def get_edit_status(job_id: str):
     """Get status of edit job."""
-    if job_id not in edit_jobs:
-        raise HTTPException(status_code=404, detail=f"Edit job {job_id} not found")
+    output_path = Path(app.state.OUTPUT_DIR) / "edits" / f"{job_id}.png"
+    job = edit_jobs.get(job_id)
 
-    return edit_jobs[job_id]
+    if job is None:
+        if output_path.exists():
+            return {
+                "id": job_id,
+                "status": "completed",
+                "output_path": str(output_path),
+                "result_url": f"/edit/result/{job_id}",
+                "image_url": f"{app.state.SERVICE_URL}/images/edits/{job_id}.png",
+                "note": "job record cleaned up"
+            }
+        raise HTTPException(status_code=404, detail=f"Edit job {job_id} not found (it may have been cleaned up)")
+
+    return job
 
 
 @app.get("/edit/result/{job_id}")
 async def get_edit_result(job_id: str):
     """Download edited image."""
-    if job_id not in edit_jobs:
-        raise HTTPException(status_code=404, detail=f"Edit job {job_id} not found")
-
-    job = edit_jobs[job_id]
-
-    if job["status"] != "completed":
-        raise HTTPException(
-            status_code=400,
-            detail=f"Job is {job['status']}, not completed"
-        )
-
-    output_path = Path(job["output_path"])
+    output_path = Path(app.state.OUTPUT_DIR) / "edits" / f"{job_id}.png"
 
     if not output_path.exists():
         raise HTTPException(
@@ -931,14 +1034,14 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     global trt_server
-    inference_queue = getattr(app.state, "inference_queue", None)
-    worker_tasks = getattr(app.state, "inference_worker_tasks", [])
+    job_queue = getattr(app.state, "job_queue", None)
+    worker_tasks = getattr(app.state, "job_worker_tasks", [])
 
-    if inference_queue:
+    if job_queue:
         # Wait for in-flight tasks to complete before shutting down workers
-        await inference_queue.join()
+        await job_queue.join()
         for _ in worker_tasks:
-            await inference_queue.put(None)
+            await job_queue.put(None)
 
         await asyncio.gather(*worker_tasks, return_exceptions=True)
 

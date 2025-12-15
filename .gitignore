@@ -206,3 +206,7 @@ trt-cache/
 
 # HuggingFace cache
 .hf_cache/
+
+# Test outputs
+test_output/
+output*.png

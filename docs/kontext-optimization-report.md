@@ -12,7 +12,11 @@ This report documents the exploration and implementation of speed optimizations 
 
 ### Key Outcomes
 
-1. Created `kontext_pipeline_fast.py` - A drop-in replacement with `torch.compile()` optimization
+1. Created `kontext_pipeline_fast.py` - A drop-in replacement with multiple optimizations:
+   - `torch.compile()` for 1.5-2x speedup
+   - QKV Fusion for ~5-10% additional speedup
+   - VAE Slicing for memory efficiency
+   - VAE Tiling for large image handling
 2. Created comprehensive test scripts for benchmarking and determinism verification
 3. Documented various optimization strategies (TensorRT, FP8, quantization) for future work
 4. Updated `.gitignore` to exclude HuggingFace cache directory
@@ -60,6 +64,9 @@ Same (image + prompt + seed) → Identical output (byte-for-byte)
 
 **Key Features:**
 - Uses `torch.compile(mode="reduce-overhead")` on the transformer
+- QKV Fusion - fuses Query/Key/Value projections into single operation (~5-10% speedup)
+- VAE Slicing - processes VAE in slices to reduce peak memory
+- VAE Tiling - tiles large images to avoid OOM errors
 - Preserves all determinism settings from original
 - Adds `warmup()` method for pre-compilation
 - Same interface as `KontextInferenceManager`
@@ -70,7 +77,10 @@ from kontext_pipeline_fast import KontextFastInferenceManager
 
 manager = KontextFastInferenceManager(
     compile_transformer=True,  # Enable torch.compile()
-    compile_mode="reduce-overhead"  # Inference-optimized
+    compile_mode="reduce-overhead",  # Inference-optimized
+    enable_qkv_fusion=True,  # Fuse QKV projections (~5-10% speedup)
+    enable_vae_slicing=True,  # Reduce memory peaks
+    enable_vae_tiling=True,  # Handle large images efficiently
 )
 
 # Optional: warmup to trigger compilation before first real request
@@ -196,6 +206,48 @@ torch.compile(
 
 ---
 
+### Implemented: QKV Fusion
+
+**How it works:**
+- Fuses the three separate Query, Key, Value projection operations into a single matrix multiplication
+- Reduces memory bandwidth by loading weights only once instead of three times
+- Fewer kernel launches = less overhead
+
+**Why it preserves determinism:**
+- Same mathematical operations, just combined
+- No approximations or randomness
+
+**Configuration:**
+```python
+self.pipeline.transformer.fuse_qkv_projections()
+```
+
+**Expected speedup:** ~5-10%
+
+---
+
+### Implemented: VAE Slicing & Tiling
+
+**VAE Slicing:**
+- Processes the VAE encoder/decoder in slices rather than all at once
+- Reduces peak memory usage without affecting output quality
+- Useful for limited VRAM scenarios
+
+**VAE Tiling:**
+- For large images, processes the image in tiles
+- Prevents out-of-memory errors on high-resolution inputs
+- Essential for images larger than 1024x1024
+
+**Configuration:**
+```python
+self.pipeline.vae.enable_slicing()
+self.pipeline.vae.enable_tiling()
+```
+
+**Note:** These are primarily memory optimizations. Speed impact is minimal unless you were previously memory-constrained.
+
+---
+
 ### Explored but Not Implemented: FP8 Quantization
 
 **What it is:**
@@ -245,7 +297,9 @@ freeze(pipeline.transformer)
 | Optimization | Speedup | Effort | Determinism Safe | Status |
 |--------------|---------|--------|------------------|--------|
 | `torch.compile()` | 1.5-2x | Low | ✅ Yes | ✅ Implemented |
-| QKV Fusion | 1.05-1.1x | Very Low | ✅ Yes | Not implemented |
+| QKV Fusion | 1.05-1.1x | Very Low | ✅ Yes | ✅ Implemented |
+| VAE Slicing | Memory savings | Very Low | ✅ Yes | ✅ Implemented |
+| VAE Tiling | Memory savings | Very Low | ✅ Yes | ✅ Implemented |
 | Reduce steps (28→20) | 1.4x | None | ✅ Yes | Using 20 in tests |
 | FP8 Quantization | 1.5-2x | Medium | ⚠️ Test needed | Not implemented |
 | TensorRT | 2x+ | High | ✅ Yes | Not implemented |
@@ -324,7 +378,7 @@ These settings are REQUIRED for Bittensor validation. Do not change.
 ### Short-term
 
 1. Verify `torch.compile()` speedup is real on H100
-2. Add QKV fusion (1 line, free speedup)
+2. ~~Add QKV fusion (1 line, free speedup)~~ ✅ Done
 3. Test 20 steps vs 28 steps quality
 
 ### Medium-term
@@ -344,7 +398,7 @@ These settings are REQUIRED for Bittensor validation. Do not change.
 | File | Type | Purpose |
 |------|------|---------|
 | `kontext_pipeline.py` | Existing | Original pipeline (unchanged) |
-| `kontext_pipeline_fast.py` | **New** | Optimized pipeline with torch.compile() |
+| `kontext_pipeline_fast.py` | **New** | Optimized pipeline with torch.compile(), QKV Fusion, VAE Slicing, VAE Tiling |
 | `test_inference_kontext.py` | **New** | Simple inference test |
 | `test_compile_speedup.py` | **New** | Benchmark original vs compiled |
 | `test_torch_compile_determinism.py` | **New** | Full determinism verification with visual grid |

@@ -1,7 +1,12 @@
 """
 FLUX.1-Kontext-dev FAST deterministic image editing pipeline.
 
-Adds torch.compile() optimization while preserving determinism.
+Optimizations applied (while preserving determinism):
+1. torch.compile() - JIT compilation for 1.5-2x speedup
+2. QKV Fusion - Fuses Query/Key/Value projections (~5-10% speedup)
+3. VAE Slicing - Reduces memory peaks
+4. VAE Tiling - Handles large images efficiently
+
 Drop-in replacement for KontextInferenceManager.
 """
 import logging
@@ -24,6 +29,8 @@ class KontextFastInferenceManager:
     Manages FLUX.1-Kontext-dev pipeline with:
     - Deterministic execution (same seed = same output)
     - torch.compile() for 1.5-2x speedup
+    - QKV fusion for ~5-10% additional speedup
+    - VAE optimizations for memory efficiency
 
     Drop-in replacement for KontextInferenceManager.
     """
@@ -32,7 +39,10 @@ class KontextFastInferenceManager:
         self,
         model_path: str = "black-forest-labs/FLUX.1-Kontext-dev",
         compile_transformer: bool = True,
-        compile_mode: str = "reduce-overhead"
+        compile_mode: str = "reduce-overhead",
+        enable_qkv_fusion: bool = True,
+        enable_vae_slicing: bool = True,
+        enable_vae_tiling: bool = True,
     ):
         """
         Initialize Kontext pipeline manager.
@@ -44,16 +54,23 @@ class KontextFastInferenceManager:
                 - "reduce-overhead": Best for inference (recommended)
                 - "default": Balanced
                 - "max-autotune": Maximum optimization, slower compile
+            enable_qkv_fusion: Fuse QKV projections for faster attention (default: True)
+            enable_vae_slicing: Enable VAE slicing to reduce memory (default: True)
+            enable_vae_tiling: Enable VAE tiling for large images (default: True)
         """
         self.model_path = model_path
         self.pipeline = None
         self.device = "cuda"
         self.compile_transformer = compile_transformer
         self.compile_mode = compile_mode
+        self.enable_qkv_fusion = enable_qkv_fusion
+        self.enable_vae_slicing = enable_vae_slicing
+        self.enable_vae_tiling = enable_vae_tiling
         self._is_compiled = False
+        self._optimizations_applied = []
 
     def load_pipeline(self):
-        """Lazy load pipeline with deterministic settings."""
+        """Lazy load pipeline with deterministic settings and optimizations."""
         if self.pipeline is not None:
             return  # Already loaded
 
@@ -73,9 +90,49 @@ class KontextFastInferenceManager:
         load_time = time.time() - load_start
         logger.info(f"Pipeline loaded in {load_time:.1f}s")
 
-        # Apply torch.compile() if enabled
+        # Apply optimizations
+        self._apply_optimizations()
+
+        # Apply torch.compile() last (after other optimizations)
         if self.compile_transformer:
             self._compile_transformer()
+
+        # Log summary of applied optimizations
+        if self._optimizations_applied:
+            logger.info(f"Optimizations applied: {', '.join(self._optimizations_applied)}")
+
+    def _apply_optimizations(self):
+        """Apply non-compile optimizations to the pipeline."""
+
+        # QKV Fusion - fuses Query, Key, Value projections into single operation
+        # This reduces memory bandwidth and improves speed by ~5-10%
+        if self.enable_qkv_fusion:
+            try:
+                self.pipeline.transformer.fuse_qkv_projections()
+                self._optimizations_applied.append("QKV Fusion")
+                logger.info("Applied QKV fusion to transformer")
+            except Exception as e:
+                logger.warning(f"Could not apply QKV fusion: {e}")
+
+        # VAE Slicing - processes VAE in slices to reduce peak memory
+        # Helpful for high-resolution images or limited VRAM
+        if self.enable_vae_slicing:
+            try:
+                self.pipeline.vae.enable_slicing()
+                self._optimizations_applied.append("VAE Slicing")
+                logger.info("Enabled VAE slicing")
+            except Exception as e:
+                logger.warning(f"Could not enable VAE slicing: {e}")
+
+        # VAE Tiling - tiles large images to avoid OOM errors
+        # Essential for images larger than 1024x1024
+        if self.enable_vae_tiling:
+            try:
+                self.pipeline.vae.enable_tiling()
+                self._optimizations_applied.append("VAE Tiling")
+                logger.info("Enabled VAE tiling")
+            except Exception as e:
+                logger.warning(f"Could not enable VAE tiling: {e}")
 
     def _compile_transformer(self):
         """

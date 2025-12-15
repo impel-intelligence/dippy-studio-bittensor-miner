@@ -203,3 +203,6 @@ yarn-error.log*
 
 # TensorRT cache directory
 trt-cache/
+
+# HuggingFace cache
+.hf_cache/

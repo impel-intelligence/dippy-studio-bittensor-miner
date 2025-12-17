@@ -203,3 +203,10 @@ yarn-error.log*
 
 # TensorRT cache directory
 trt-cache/
+
+# HuggingFace cache
+.hf_cache/
+
+# Test outputs
+test_output/
+output*.png

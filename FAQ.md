@@ -14,7 +14,7 @@ Miners provide computational resources to process requests from validators.
 5. Emissions are distributed based on relative performance compared to other miners
 
 ### What types of jobs are there?
-- **Inference jobs**: Currently active - miners process inference requests using the base model provided
+- **Inference jobs**: Currently active - miners process inference requests using the base model provided (flux dev)
 - **Edit jobs**: Optional FLUX.1-Kontext editing
 
 ### How is miner selection determined?
@@ -24,7 +24,8 @@ The orchestrator uses a routing algorithm that considers:
 - Availability and capacity
 
 ### What model is being used?
-All miners currently use the same base model for inference. In the future, lora inference will be introduced, allowing for more differentiation between miners.
+All miners currently use the same base model for inference. 
+
 
 ## Mining and Requests
 
@@ -74,7 +75,7 @@ You can run the validator code directly to fetch scores and the converted weight
 ## Troubleshooting
 
 ### Why haven't I received any requests?
-If you have low stake, this is likely expected. Miners with larger amounts of stake are coming online and being prioritized for request distribution.
+If you have low stake, this is likely expected. Miners with larger amounts of stake are coming online and being prioritized for request distribution. Your miner could also have been marked as a slashed miner if you have an incorrect setup. Check https://orchestrator.dippy-bittensor.studio/banned/addresses for details
 
 
 ### I see "401 Unauthorized" in my logs. Should I be concerned?

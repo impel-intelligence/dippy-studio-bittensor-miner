@@ -282,7 +282,7 @@ async def capacity(authenticated: bool = Depends(verify_epistula_auth)):
 async def trigger_telemetry(authenticated: bool = Depends(verify_epistula_auth)):
     """Forward a basic telemetry payload to the telemetry service."""
     config = get_config()
-    telemetry_url = "https://sn11.dippy-bittensor-subnet.com/optional_telemetry"
+    telemetry_url = "https://telemetry.dippy-bittensor.studio/optional_telemetry"
     payload = {
         "timestamp_ms": int(time.time() * 1000),
         "miner_hotkey": config.auth.miner_hotkey,

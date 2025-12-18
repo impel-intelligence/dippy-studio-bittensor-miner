@@ -16,7 +16,7 @@ This reverse proxy serves as the public-facing entrypoint for the Bittensor mine
 
 - Python 3.8 or higher
 - A valid Bittensor hotkey for authentication
-- Enough alpha stake. The alpha stake required will be dynamic and will be available at https://sn11.dippy-bittensor-subnet.com/alpha once all validators are online 
+- Enough alpha stake. See https://orchestrator.dippy-bittensor.studio/miner_status for miner status.  
 - H100 PCIe with the following specific `nvidia-smi` configuration
 ```
 +-----------------------------------------------------------------------------------------+
@@ -78,14 +78,14 @@ The total commit string is limited to 128 bytes to comply with blockchain constr
 
 #### Commands
 
-The `register.py` script provides three main commands:
+The `cli.py` script provides three main commands:
 
 ##### 1. Register Command
 
 Register your miner's network endpoint on the blockchain.
 
 ```bash
-python register.py register --network finney --netuid 11 --wallet.name <coldkey> --wallet.hotkey <hotkey> --address <ip_address> --port <port> --online
+python cli.py register --network finney --netuid 11 --wallet.name <coldkey> --wallet.hotkey <hotkey> --address <ip_address> --port <port> --online
 ```
 
 **Parameters:**
@@ -99,7 +99,7 @@ python register.py register --network finney --netuid 11 --wallet.name <coldkey>
 
 **Example:**
 ```bash
-python register.py register --network finney --netuid 11 --wallet.name coldkey --wallet.hotkey hotkey11 --address "13.89.38.129" --port "9999" --online
+python cli.py register --network finney --netuid 11 --wallet.name coldkey --wallet.hotkey hotkey11 --address "13.89.38.129" --port "9999" --online
 ```
 
 ##### 2. Check Command
@@ -107,7 +107,7 @@ python register.py register --network finney --netuid 11 --wallet.name coldkey -
 View all registered miners on the subnet.
 
 ```bash
-python register.py check --network finney --netuid 11 [--verbose]
+python cli.py check --network finney --netuid 11 [--verbose]
 ```
 
 **Parameters:**
@@ -117,12 +117,12 @@ python register.py check --network finney --netuid 11 [--verbose]
 
 **Example (basic):**
 ```bash
-python register.py check --network finney --netuid 11
+python cli.py check --network finney --netuid 11
 ```
 
 **Example (verbose):**
 ```bash
-python register.py check --network finney --netuid 11 --verbose
+python cli.py check --network finney --netuid 11 --verbose
 ```
 
 ##### 3. Read Command
@@ -130,7 +130,7 @@ python register.py check --network finney --netuid 11 --verbose
 Read all registrations (legacy format support).
 
 ```bash
-python register.py read --network finney --netuid 11
+python cli.py read --network finney --netuid 11
 ```
 
 #### Output Format
@@ -176,7 +176,7 @@ The check command displays:
 For detailed logging, add `--logging.debug`:
 
 ```bash
-python register.py register --network finney --netuid 11 --wallet.name coldkey --wallet.hotkey hotkey11 --address "13.89.38.129" --port "9999" --logging.debug --online
+python cli.py register --network finney --netuid 11 --wallet.name coldkey --wallet.hotkey hotkey11 --address "13.89.38.129" --port "9999" --logging.debug --online
 ```
 
 #### Important Notes
